@@ -1,0 +1,245 @@
+---
+title: "Data preperation for permuations - BH FDR correction and data filtering"
+name: Hamid Fotowatikha
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+# In the chuck below, we load in all the essential libraries for the data analysis
+```{r Load Libraries, echo=FALSE, results=FALSE, include=FALSE, include=FALSE}
+install.packages(c("BiocManager", "vcfR", "tidyr", "dplyr", "dbplyr", "patchwork", "tidyverse", "gsubfn", "purrr", 
+                   "lme4", "lmerTest", "broom.mixed", "glmmTMB", "DHARMa", "car", "ggplot2", "qqman", "stats", 
+                   "kableExtra", "knitr", "writexl", "furrr", "future", "future.apply", "data.table", "topr", "pheatmap"))
+
+BiocManager::install(c("VariantAnnotation", "annotatr", "GenomicFeatures", "TxDb.Dmelanogaster.UCSC.dm6.ensGene", 
+                        "org.Dm.eg.db", "AnnotationHub", "ensembldb", "clusterProfiler", "org.Hs.eg.db", "biomaRt", 
+                        "Biostrings", "GenomicRanges", "BSgenome.Dmelanogaster.UCSC.dm6", "Rsamtools", "txdbmaker"))
+#BiocManager
+library(BiocManager)
+#VariantAnnotation
+library(VariantAnnotation)
+# for vcf
+library(vcfR)
+# For parsing
+library(tidyr)
+library(dplyr)
+library(dbplyr)
+library(patchwork)
+library(tidyverse)
+library(gsubfn) 
+library(purrr)
+# for glm
+library(lme4)
+library(lmerTest) 
+library(broom.mixed) # For tidying model output
+library(glmmTMB) # for weighted GLMM
+library(DHARMa) # to check statistical assumptions
+library(car) # for type3 anova 
+# for plots
+library(ggplot2)
+library(patchwork)  # Allows combining multiple ggplots
+library(ggrepel) 
+library(pheatmap) 
+library(ggforce) 
+library(RColorBrewer)
+library(qqman) # for manhatten and qqplot
+library(stats)       # KS test
+# For tables:
+library(kableExtra)
+library(knitr)
+# Some other packages for gene information extraction from Ensembl
+library(BiocFileCache)
+library(AnnotationHub)
+library(ensembldb)  
+# For annotation, gene name conversions (yes, we include human too)
+#library(rPanglaoDB)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(org.Dm.eg.db)
+library(biomaRt)
+library(Biostrings) # to find reverse complement
+# Save DEGs to excel sheet with gene information
+library(writexl)
+# For multithreading and memory management
+library(furrr)
+library(future)
+library(future.apply)
+library(data.table) # for large DFs and fast data manipulation
+# For genetic annotation
+library(txdbmaker)
+library(annotatr)  # Main package for annotation
+library(GenomicFeatures)  # Extracting genomic features from TxDb.
+library(TxDb.Dmelanogaster.UCSC.dm6.ensGene)  # Transcript data for Drosophila DM6
+library(org.Dm.eg.db)  # Gene annotations for Drosophila
+library(GenomicRanges)  # Handling genomic intervals
+# Exon mutation annotation
+library(Rsamtools) # to import cutom .fa
+library(VariantAnnotation)
+library(BSgenome.Dmelanogaster.UCSC.dm6)
+# TopR visualition
+library(topr)
+```
+
+
+#### Load in the the Softweight GLMM results and prepare data to permuted ####
+#### Also visualize some of the statistics  ####
+```{r Prepaare data pemrutation, fig.height=20, fig.width=7, echo=FALSE, warning=FALSE, message=FALSE}
+# Load necessary libraries
+library(ggplot2)
+library(dplyr)
+library(data.table)  # Fast file reading
+library(qqman)       # For QQ plot
+library(stats)       # KS test
+
+#################### Chunk #################### 
+# // Before manhaton plots, we evaluate the performance of the test
+# // We summarize it and look at the variation of the p-values
+# // We carry out assumption analysis for BH FDR by (1 QQ plot, 2 KS TEST to check Check for uniformity, and 3 LD correltaion based on pvalues)
+####################       ####################
+
+# read the original vcf_short (this will only be used for grpahs)
+vcf_short <- read.csv("/Users/hamid/Desktop/GEN MSc Project/Data/SoftWeight_vcf_short_full.csv")
+# Open the GLMM results of the full model (included age_group and interaction of age_group within the fly_population) (SPECIFY SoftWeight ACCORDINGLY!!!!!!!!!!!!!!!!!!)
+test_results <- read.csv("/Users/hamid/Desktop/GEN MSc Project/Data/GLMM_results_full_model_SoftWeight.csv")
+
+# ASSUMPTION TESTING FOR BH_FDR
+# ------ (1) QQ PLOT (Checking Uniformity) ------
+# ------ (2) KS TEST (Check for uniformity) ------
+# ------ (3) CORRELATION ANALYSIS (Approximate LD by checking correlation of p-values for nearby variants in each chromosome)  ------
+
+# Define comparisons with corresponding p-value columns from test_results
+comparisons <- list(
+  "Fly Group (CE - Early Reproduction vs. CL - Late Reproduction)" = "p_value_fly_group",
+  "Age Group (Young vs Old - General)" = "p_value_age_group",
+  "Fly Group × Age Group (Young vs Old - Within CE and/or CL)" = "p_value_age_fly_group"
+)
+# Choose position for LD and KS in the ggplot grid
+# For KS
+ks_x_fixed <- 1.1  # Set a fixed X position
+ks_y_fixed <- 19.5    # Set a fixed Y position for KS test annotation
+# For LD
+ld_x_fixed <- 1.5  # Set a fixed X position (same as KS for alignment)
+ld_y_fixed <- 13    # Set a fixed Y position for LD correlation annotation
+
+# Generate QQ plots with KS test and LD correlation
+qq_plots <- map2(comparisons, names(comparisons), function(p_value_col, title) {
+  # Extract p-values correctly from test_results
+  p_values <- test_results[[p_value_col]]
+  n <- length(p_values)
+
+  # Generate QQ plot data
+  qqplot_data <- data.frame(
+    observed = sort(p_values),
+    expected = (1:n) / (n + 1) # More precise expected values
+  )
+
+  # Perform KS test (Uniformity test)
+  ks_test_result <- ks.test(p_values, "punif")
+  ks_p_value_num <- ks_test_result$p.value
+  ks_p_value <- ifelse(ks_p_value_num < 2.2e-16, " <2.2e-16",
+                       formatC(ks_p_value_num, format = "e", digits = 2)) # Handle small p-values properly
+  
+  # Color KS p-value red if significant (p < 0.05)
+  ks_color <- ifelse(ks_p_value_num < 0.05, "red", "black")
+
+  # LD correlation analysis (directly using the correct p-value column)
+  ld_correlation <- test_results %>%
+    arrange(CHROM, POS) %>%
+    mutate(pvalue_log = -log10(.data[[p_value_col]])) %>%
+    group_by(CHROM) %>%
+    summarise(correlation = cor(pvalue_log, lag(pvalue_log), use = "pairwise.complete.obs")) %>%
+    ungroup()
+
+  # Format LD correlations per chromosome for annotation
+  ld_text <- paste(ld_correlation$CHROM, ":", formatC(ld_correlation$correlation, format = "f", digits = 3), collapse = "\n")
+
+  # Set consistent x-axis and y-axis range for all plots, we need to do this for fixed labels across all plots
+  max_x <- 5.8  # Fixed x-range across all plots
+  max_y <- 20  # Fixed y-range across all plots
+
+  # Create QQ plot with annotations
+  ggplot(qqplot_data, aes(x = -log10(expected), y = -log10(observed))) +
+    geom_point(alpha = 0.7, color = "black", size = 1.3) + # More readable
+    geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed", linewidth = 1) + 
+    labs(
+      title = paste("QQ Plot P-values:", title),
+      x = expression(Expected ~ -log10(italic(p))),
+      y = expression(Observed ~ -log10(italic(p)))
+    ) +
+    # KS test annotation (colored if p < 0.05)
+    annotate("text", x = ks_x_fixed, y = ks_y_fixed, 
+             label = paste("KS p =", ks_p_value), 
+             color = ks_color, hjust = 1, size = 4) +
+    # LD Correlation per chromosome annotation
+    annotate("text", x = ld_x_fixed, y = ld_y_fixed, 
+             label = paste("LD Correlation per Chr:\n", ld_text), 
+             hjust = 1, size = 4) +
+    coord_cartesian(xlim = c(0, max_x), ylim = c(0, max_y)) + # Consistent axis ranges
+    theme_classic(base_size = 16) + # Academic style (no grid)
+    theme(
+      plot.title = element_text(face = "bold", hjust = 0.5, size = 10), # Smaller title
+      axis.title = element_text(face = "bold", size = 12) # Keeps axis labels strong
+    )
+})
+# Display all plots
+qq_plots # call funtion
+rm(ks_x_fixed)
+rm(ks_y_fixed)
+rm(ld_x_fixed)
+rm(ld_y_fixed)
+rm(qq_plots)
+rm(comparisons)
+
+#################### Chunk #################### 
+# // Given that BH-FDR assumption hold well for the age_group and age_fly_group (interactions term), we have to carry out FDR based on 
+# // Permutations are computationally expensive, thus we subset the data, with the assumption that we don't miss out on variants that are already p<=0.01. 
+####################       ####################
+
+test_results$adjusted_p_value_age_group <- p.adjust(test_results$p_value_age_group, method = "fdr")
+test_results$adjusted_p_value_age_fly_group <- p.adjust(test_results$p_value_age_fly_group, method = "fdr")
+
+
+
+#################### Chunk #################### 
+# // Prepare permutation of subset of data with pvlaues <=0.01
+# // Given that BH-FDR assumption does not hold for the fly_group, we have to carry out FDR based on permutation with maximum mismatch
+# // Permutations are computationally expensive, thus we subset the data, with the assumption that we don't miss out on variants that are already p<=0.01. 
+####################       ####################
+
+# This keeps all variants where at least one of the p-values (p_value_fly_group, p_value_age_group, p_value_age_fly_group) is significant (i.e. < 0.01)
+# THIS IS TO MAKE PERMUTED DATA, ONLY RUN ONCE!!!
+test_results_sig <- test_results %>%
+  filter(p_value_fly_group <= 0.01 |
+         p_value_age_group <= 0.01 |
+         p_value_age_fly_group <= 0.01)
+
+# Or only based on significant fly group, as BH-FDR can be applied on p_value_age_group and p_value_age_fly_group with the SoftWeight model
+# THIS IS FOR AFTER GLMM ON PERMUTED DATA!!!!
+test_results_sig <- test_results %>%
+  filter(p_value_fly_group <= 0.01 |
+         adjusted_p_value_age_group <= 0.01 |
+         adjusted_p_value_age_fly_group <= 0.01)
+
+###### DO NOT RUN IF ALREADY DONE #######
+###### Make Permutation dataframe #######
+# Make a new dataframe from original vcf_short that we want to use to make permutations
+# We use the very efficient approach that can handle large dataframes with easy
+# We make a dataframe that contains all the variant_ids with a P<0.01, we make use of the original vcf_short to parse the right format compaaible with the model code.
+vcf_short_permute <- vcf_short %>%
+  dplyr::filter(variant_id %in% test_results$variant_id)
+
+setDT(vcf_short)
+setDT(test_results_sig)
+vcf_short_permute <- vcf_short[test_results_sig, on = .(variant_id), nomatch = 0][, .SD, .SDcols = names(vcf_short)]
+vcf_short_permute$X <- NULL # Remove X columns
+vcf_short_permute$weight <- NULL # Remove weights as these will be recalculated for each permuted variant
+
+# Save the data to be permuted! (SPECIFY SoftWeight ACCORDINGLY!!!!!!!!!!!!!!!!!!)
+# Upload to HPC for permutation 
+write.csv(vcf_short_permute, "/Users/hamid/Desktop/GEN MSc Project/Data/SoftWeight_vcf_short_full_for_permutation.csv")
+
+rm(test_results) # Remove Dfs we dont need
+rm(vcf_short_permute)
+```

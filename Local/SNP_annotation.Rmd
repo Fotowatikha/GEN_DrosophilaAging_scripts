@@ -1,0 +1,899 @@
+---
+title: "SNP annotations - with GenomicRanges and GenomicFeatures packages"
+name: Hamid Fotowatikha
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+# In the chuck below, we load in all the essential libraries for the data analysis
+```{r Load Libraries, echo=FALSE, results=FALSE, include=FALSE, include=FALSE}
+install.packages(c("BiocManager", "vcfR", "tidyr", "dplyr", "dbplyr", "patchwork", "tidyverse", "gsubfn", "purrr", 
+                   "lme4", "lmerTest", "broom.mixed", "glmmTMB", "DHARMa", "car", "ggplot2", "qqman", "stats", 
+                   "kableExtra", "knitr", "writexl", "furrr", "future", "future.apply", "data.table", "topr", "pheatmap"))
+
+BiocManager::install(c("VariantAnnotation", "annotatr", "GenomicFeatures", "TxDb.Dmelanogaster.UCSC.dm6.ensGene", 
+                        "org.Dm.eg.db", "AnnotationHub", "ensembldb", "clusterProfiler", "org.Hs.eg.db", "biomaRt", 
+                        "Biostrings", "GenomicRanges", "BSgenome.Dmelanogaster.UCSC.dm6", "Rsamtools", "txdbmaker"))
+#BiocManager
+library(BiocManager)
+#VariantAnnotation
+library(VariantAnnotation)
+# for vcf
+library(vcfR)
+# For parsing
+library(tidyr)
+library(dplyr)
+library(dbplyr)
+library(patchwork)
+library(tidyverse)
+library(gsubfn) 
+library(purrr)
+# for glm
+library(lme4)
+library(lmerTest) 
+library(broom.mixed) # For tidying model output
+library(glmmTMB) # for weighted GLMM
+library(DHARMa) # to check statistical assumptions
+library(car) # for type3 anova 
+# for plots
+library(ggplot2)
+library(patchwork)  # Allows combining multiple ggplots
+library(ggrepel) 
+library(pheatmap) 
+library(ggforce) 
+library(RColorBrewer)
+library(qqman) # for manhatten and qqplot
+library(stats)       # KS test
+# For tables:
+library(kableExtra)
+library(knitr)
+# Some other packages for gene information extraction from Ensembl
+library(BiocFileCache)
+library(AnnotationHub)
+library(ensembldb)  
+# For annotation, gene name conversions (yes, we include human too)
+#library(rPanglaoDB)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(org.Dm.eg.db)
+library(biomaRt)
+library(Biostrings) # to find reverse complement
+# Save DEGs to excel sheet with gene information
+library(writexl)
+# For multithreading and memory management
+library(furrr)
+library(future)
+library(future.apply)
+library(data.table) # for large DFs and fast data manipulation
+# For genetic annotation
+library(txdbmaker)
+library(annotatr)  # Main package for annotation
+library(GenomicFeatures)  # Extracting genomic features from TxDb.
+library(TxDb.Dmelanogaster.UCSC.dm6.ensGene)  # Transcript data for Drosophila DM6
+library(org.Dm.eg.db)  # Gene annotations for Drosophila
+library(GenomicRanges)  # Handling genomic intervals
+# Exon mutation annotation
+library(Rsamtools) # to import cutom .fa
+library(VariantAnnotation)
+library(BSgenome.Dmelanogaster.UCSC.dm6)
+# TopR visualition
+library(topr)
+```
+
+
+# Data analysis after permutation
+# Also gene anntation and Manhatton
+```{r Data analysi, fig.height=10, fig.width=6, echo=FALSE, warning=FALSE, message=FALSE}
+# fig.height=3.5, fig.width=6.5 default
+
+#################### Chunk #################### 
+# // Genic Annotations of variants with FDR == 0
+# // Genic annotations are determined by functions from GenomicFeatures and data from the TxDb.dm and org.dm.eg.db packages. 
+# // Genic annotations include 1-5Kb upstream of the TSS, the promoter (< 1Kb upstream of the TSS), 5’UTR, first exons, exons, introns, CDS, 3’UTR, and intergenic regions (the intergenic regions exclude the previous list of annotations). 
+# // This work is carried out according to the following documentations:
+# -- https://bioconductor.org/packages/devel/bioc/vignettes/GenomicFeatures/inst/doc/GenomicFeatures.html#installing-the-genomicfeatures-package
+# -- https://bioconductor.org/packages/devel/bioc/vignettes/annotatr/inst/doc/annotatr-vignette.html#introduction
+# // We make use of the txdb databse: TxDb.Dmelanogaster.UCSC.dm6.ensGene which is compatible with all BDGP6.nn releases from ENSAMBL
+# // TxDb.Dmelanogaster.UCSC.dm6 provides gene, transcript, exon, and CDS annotations based on the dm6 assembly from UCSC, using Ensembl gene models (ensGene).
+####################       ####################
+
+vcf_short <- read.csv("/Users/hamid/Desktop/GEN MSc Project/Data/SoftWeight_vcf_short_full.csv")
+
+# Read the file if not already loaded in current session, and use this to annoted the genes
+test_results <- read.csv("/Users/hamid/Desktop/GEN MSc Project/Data/TEST/test_results_with_FDR_20Permutations.csv")
+
+# Extract only variants that have an FDR of 0, this is very conservative, but likely less false positives
+test_results <- test_results %>%
+  filter(Mean_FDR_fly_group <= 0)
+
+
+# load the the Drosophila DM6
+# Loading the package like this will also create a TxDb object, and by default that object will have the same name as the package itself
+#txdb <- TxDb.Dmelanogaster.UCSC.dm6.ensGene
+#TxDb.Dmelanogaster.UCSC.dm6.ensGene # extract information for material and methods
+
+txdb <- makeTxDbFromGFF("/Users/hamid/Desktop/GEN MSc Project/HackFlex test/Indexed bams (H200:B200 12:16 cycles)/1. Dros fa:gtf/Drosophila_melanogaster.BDGP6.46.112.sorted.gtf", organism = "Drosophila melanogaster") # Or from our own .gtf from ensambl
+# Checking available information in the Drosohila TxDb object
+columns(txdb) # Check available columns (e.g. "CDSCHROM"   "CDSEND"     "CDSID"      "CDSNAME"    "CDSSTART"...)
+keytypes(txdb) # Check for avvailable Keytypes (e.g. "CDSID"    "CDSNAME"  "EXONID"   "EXONNAME" "GENEID"   "TXID"     "TXNAME"...)
+
+# Change chromosome names to match dm6 assembly, so chromosome "2L" becomes chr2L. We do this to ensure compatibility when parsing
+#test_results$CHROM <- paste0("chr", test_results$CHROM) # DO NOT RUN THIS TWICE FOR FUCK SAKE or when using custom .gtf!!!
+
+# For example, If we wanted to only set Chromosome 2L to be active, we could do it like this
+# BUT WE WILL NOT DO THAT, because then on only chromosome 2L would be consulted when you call the various retrieval methods
+head(seqlevels(txdb)) # Check chromosomes
+#seqlevels(txdb) <- "chr2L" # note that we can use regular "2L" names when making our own txdb from ENSAMBL .gtf
+# If we need to reset back to the original seqlevels (i.e. to the seqlevels stored in the db), then set the seqlevels to:
+#seqlevels(txdb) <- seqlevels0(txdb)
+
+# Now we will define the regions we want to annotate, these are essentially metadata objects
+# Define promoters
+promoters <- promoters(txdb, upstream = 1000, downstream = 0) #  upstream and downstream to specifies regions around TSS to be used as a promoter while accounting for a transcripts's strand.
+# Define enhancer region
+upstream_1to5kb <- promoters(txdb, upstream = 5000, downstream = 1000)
+# Define 5’UTR, 3’UTR, CDS, Exons, Introns
+fiveUTRs <- fiveUTRsByTranscript(txdb, use.names = TRUE)
+threeUTRs <- threeUTRsByTranscript(txdb, use.names = TRUE)
+cds_regions <- cdsBy(txdb, by = "tx", use.names = TRUE)  # CDS (Coding Sequences) "tx" is by transcript (so it inlcudes isophorms)
+exons <- exonsBy(txdb, by = "gene")  # Exons
+introns <- intronsByTranscript(txdb, use.names = TRUE)  # Introns
+intergenic_regions <- gaps(unlist(range(exons)))  # Regions between genes: There is no built-in intergenic annotation, but we can define intergenic regions as any region that is not assigned to a gene in txdb. We will not use this in the end!!!
+
+# Convert our test_results to a GenomicRanges object
+test_results_gr <- makeGRangesFromDataFrame(
+    test_results,
+    seqnames.field = "CHROM",
+    start.field = "POS",
+    end.field = "POS",  # SNPs are single positions so end position is the same as start position
+    keep.extra.columns = TRUE  # Retain variant_id column
+)
+
+########## Function ########## 
+# // Function to annotate the variants using findOverlaps() function
+# // Since annotatr does not support CDS, we manually annotate SNPs with all genic regions
+annotate_overlap <- function(snps, annotation, name) {
+    hits <- findOverlaps(snps, annotation)
+    df <- data.frame(
+        variant_id = test_results$variant_id[queryHits(hits)],
+        Annotation_Type = name,
+        Gene_ID = names(annotation)[subjectHits(hits)]
+    )
+    return(df)
+}
+# Apply the function
+annotations_list <- list(
+    annotate_overlap(test_results_gr, promoters, "Promoter"),
+    annotate_overlap(test_results_gr, upstream_1to5kb, "1-5Kb Upstream"),
+    annotate_overlap(test_results_gr, fiveUTRs, "5'UTR"),
+    annotate_overlap(test_results_gr, threeUTRs, "3'UTR"),
+    annotate_overlap(test_results_gr, cds_regions, "CDS"),
+    annotate_overlap(test_results_gr, exons, "Exon"),
+    annotate_overlap(test_results_gr, introns, "Intron"))
+
+
+
+#################### Chunk #################### 
+# // Here we leverage AnnotationHub to convert flybase GENE_IDs to actual gene names
+# // We use the latest Drosophila melanogaster annotations from Ensambk databse
+# // Servers could be down in some instances, that does not mean the code does not work!!!
+####################       ####################
+
+# Connect to AnnotationHub
+ann.hub <- AnnotationHub(ask = FALSE)
+ann.hub.database <- query(ann.hub, pattern = c("Drosophila melanogaster", "EnsDb"), ignore.case = TRUE)
+# Acquire the latest annotation files ID
+id <- ann.hub.database %>%
+        mcols() %>%
+        rownames() %>%
+        tail(n = 1) # The most bottom iuID in the ann.hub.database represent the most updated
+# Downloading the Ensembldb database
+ensembl.database <- ann.hub[[id]]
+# Extract gene-level information from the database
+annotations <- genes(ensembl.database, 
+                     return.type = "data.frame")
+# Select annotations of interest
+annotations <- annotations %>%
+        dplyr::select(gene_id, canonical_transcript, gene_name, seq_name, gene_biotype, description)
+
+# Annotate the regions using the annotation hub database
+annotated_snps <- list()
+# Loop through each dataframe in annotations_list containing unique regions of the genome (e.g Exon, Intron ect)
+for (i in seq_along(annotations_list)) {
+  df <- annotations_list[[i]]  # Extract dataframe
+  # if "Exon" is present in "Annotation_Type", Merge using gene_id (FBgn..........) as exons are annotated with FBgn
+  if (any(grepl("Exon", df$Annotation_Type, ignore.case = TRUE))) {
+    merged_df <- df %>%
+      left_join(annotations, by = c("Gene_ID" = "gene_id")) 
+  } else { # Merge using canonical_transcript (FBtr..........), because only Exons have FBgn values in our annotation method using txdb
+    merged_df <- df %>%
+      left_join(annotations, by = c("Gene_ID" = "canonical_transcript")) # the rest contains FBtr "canonical_transcripts"
+  }
+  # Store the processed dataframe back in the empty list
+  annotated_snps[[i]] <- merged_df
+}
+
+# Now change the "exon" FBgn names back to FBtr for consistent naming for all annotated variants
+for (i in seq_along(annotated_snps)) {
+  # if "Exon" is present in "Annotation_Type", rename FBgn to corresponding FBtr
+  if (any(grepl("Exon", annotated_snps[[i]], ignore.case = TRUE))) { 
+    annotated_snps[[i]]$Gene_ID <- annotated_snps[[i]]$canonical_transcript
+  }
+}
+
+# Merge the generated lists of "annotations_list" each annotated variant (e.g.Promoter, Exons, Intron...)
+annotated_snps_df <- bind_rows(annotated_snps)
+annotated_snps_df$gene_id <- NULL
+annotated_snps_df$canonical_transcript <- NULL
+
+
+
+#################### Chunk #################### 
+# // Here we leverage FlyBase to convert flybase GENE_IDs to actual gene names if they were missed out by the Ensambl annotation (we do this to geve actual gene names to canonical transcrips, aka isoforms)
+# // We use the latest Drosophila melanogaster annotations from FlyBase ung the FlyBase/Tools/Batch Download tool
+# // Missing annotation will be extracted and used as input in FlyBase. The output will then be mapped in the original annotation dataframe
+# // In addition, some miRNAs simply have no gene-symbol, characterized as "-", we will replace these names as their fly base symbol
+####################       ####################
+
+# ONLY RUN THIS ONCE
+# Extract Gene_IDs where gene_name is NA or "" (empty charecter due to ENSAMBL error), as we import them in FlyBase/Tools/Batch Download
+#missing_gene_names <- annotated_snps_df$Gene_ID[is.na(annotated_snps_df$gene_name) | annotated_snps_df$gene_name == ""]
+# Save the extracted Gene_IDs to a text file adn upload to FlyBase
+#writeLines(missing_gene_names, "/Users/hamid/Desktop/GEN MSc Project/Data/FlyBase Annotations/Gene_IDs_input.txt")
+
+
+
+########## RUN ON FLYBASE FlyBase/Tools/Batch Download ########## Then Continue below
+# Read the text file (assuming it is tab-separated)
+flybase_missing_annotation <- read.delim("/Users/hamid/Downloads/FlyBase_Fields_download.txt", header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+# Change annotated mi-RNA "-" to Flybase SYMBOL
+# These genes cannot be used for GO enrichment
+flybase_missing_annotation$ASSOCIATED_GENE[flybase_missing_annotation$ASSOCIATED_GENE == "-"] <- 
+  flybase_missing_annotation$SYMBOL[flybase_missing_annotation$ASSOCIATED_GENE == "-"]
+
+# Match Gene_IDs in annotated_snps_df with X.SUBMITTED.ID in flybase_missing_annotation
+match_idx <- match(annotated_snps_df$Gene_ID, flybase_missing_annotation$X.SUBMITTED.ID)
+# Extract ASSOCIATED_GENE where there is a match
+matched_genes <- flybase_missing_annotation$ASSOCIATED_GENE[match_idx]
+# Replace gene_name only where a match is found and not previously annotated (is not NA)
+annotated_snps_df$gene_name[!is.na(matched_genes)] <- matched_genes[!is.na(matched_genes)]
+
+# Correct the Sick and Nav gene names
+# Since Sick and Nav are the same genes, we ensure that they are the same between the Flybase and Ensambl annotation
+# We prioritize Ensambl as this is our main way of annotation
+# NOTE: this line of code will be obsolete in the future as ENSAMBL and FLYBASE often match updated annotations
+annotated_snps_df$gene_name[annotated_snps_df$gene_name == "Nav"] <- 
+  annotated_snps_df$gene_name[annotated_snps_df$gene_name == "sick"]
+
+# Ensure that all gene_biotype are shared among all genes if exists.
+# Since we annotated using ENSAMBL and FLybase, the gene_biotype are NA for FLybase annotations, so we need to fix it
+annotated_snps_df$gene_biotype <- ave(annotated_snps_df$gene_biotype, annotated_snps_df$gene_name, 
+                                      FUN = function(x) { # Funtion to check If all values are NA, in order return NA or replace NA with the most frequent non-NA value
+                                        if (all(is.na(x))) return(NA)
+                                        # Else replace NA with the non-NA value
+                                        rep(na.omit(x)[which.max(tabulate(match(na.omit(x), na.omit(x))))], length(x))
+                                      })
+
+# Those that still remain NA are those genes that were exclusivly annotated by Flybase. As these genes will always contains NAs for gene_biotype
+# To fix this, we levarage the FLyBase FEATURE_TYPE (e.g. mRNA, miRNA), where for example mRNA corresponds to protein_coding and miRNA to ncRNA (nc for non-coding)
+# Fill NAs in gene_biotype with FEATURE_TYPE from flybase_missing_annotation (if a match is found)
+annotated_snps_df$gene_biotype[is.na(annotated_snps_df$gene_biotype)] <- 
+  flybase_missing_annotation$FEATURE_TYPE[match_idx][is.na(annotated_snps_df$gene_biotype)]
+# Change the remaining mRNA to protein_coding for consistency for all annotations
+annotated_snps_df$gene_biotype[annotated_snps_df$gene_biotype == "mRNA"] <- "protein_coding"
+
+# NOTE, we still need to write a general puropose script to also convert miRNA and other unique FlyBase biotypes to ENSAMBL format.
+# Since we onyl have mRNA, we dont need to do that for now. Will be added later after validation
+
+
+
+#################### Chunk #################### 
+# // Now for each unique variant_id, we will count the number of isoform transcripts affected by the variant type
+# // For instance, a CDC variant in a exon can affect multiple isofroms if the isoforms use the same codon to encode for an amino acid
+# // We will do this for all annotation types (i.e. CDS, 5-3'UTR, Intron, Promoter, 1-5kb upstream). Exons will not be includes as these are contained within CDS and 5-3'UTR
+# // We will additionally calculate how often a gene is affected for unique annotation types (CDS, 5-3'UTR, Intron, Promoter, 1-5kb upstream), including with and without isoforms
+# // We also calculate which gene has the most mutations (contains a variant) in CDS, 5-3'UTR, Intron, Promoter, 1-5kb upstream
+# // This Chuck contains a nested sub Chunk
+####################       ####################
+
+# Retrieve the number of total isoforms exist for a gene that we annotated:
+# Extract transcript information per gene from txdb (our GTF file for drosophila)
+tx_by_gene <- transcriptsBy(txdb, by = "gene")
+# Create a table for isoform counts
+isoform_counts <- data.frame(Gene_ID = names(tx_by_gene),  # Gene IDs, as these are unique for each isoform
+    Isoform_Count = elementNROWS(tx_by_gene))
+# change the gene_id to gene symbol using our previous ENSAMBL gene symbols
+isoform_counts <- merge(isoform_counts, annotations[, c("gene_id", "gene_name")], by.x = "Gene_ID", by.y = "gene_id", all.x = TRUE)
+# Merge the isoform count with annotated_snps_df using the gene symbols, and by bringing over the isoform count per gene
+annotated_snps_df <- merge(annotated_snps_df, isoform_counts[, c("gene_name", "Isoform_Count")], by = "gene_name", all.x = TRUE)
+# Rename the column
+colnames(annotated_snps_df)[colnames(annotated_snps_df) == "Isoform_Count"] <- "total_isoforms"
+
+# Calculate the number of isoforms detected for each unique gene
+# Not counting rows that contains a "Exon" in annotated_snps_df$Annotation_Type as these are already present in the either CDC or UTRs
+annotated_snps_df$detected_isoforms_per_gene <- ave(annotated_snps_df$Gene_ID, annotated_snps_df$gene_name, 
+                                                    FUN = function(x) length(unique(x[annotated_snps_df$Annotation_Type[annotated_snps_df$Gene_ID %in% x] != "Exon"]))) 
+# Since ncRNA do not have CDS, these will now become 0 for detected_isoforms_per_gene.To fix this we add a 1 to all 0 in this column
+annotated_snps_df$detected_isoforms_per_gene[annotated_snps_df$detected_isoforms_per_gene == 0] <- 1
+# Replace NA values in total_isoforms with detected_isoforms_per_gene
+annotated_snps_df$total_isoforms[is.na(annotated_snps_df$total_isoforms)] <- annotated_snps_df$detected_isoforms_per_gene[is.na(annotated_snps_df$total_isoforms)]
+
+
+#################### Sub Chunk ####################
+# // This is a Sub Chunck part of the one above
+# // Filter out variants where the Annotation_Type is "1-5Kb Upstream", but only if there are duplicate combinations of variant_id, gene_name, and Gene_ID (cannonical transcripts).
+# // The reason for this is that 1-5Kb Upstream were found with he promoter() function, which is biased when a true variant is inside anything except true 1-5Kb Upstream regions. 
+# This can run very slow, so will not ude the ave() funtion to speed up the iterative search
+####################       ####################
+# We start with finding rows where the combination of variant_id, gene_name, and Gene_ID occurs more than once. We do that by creating a unique identifier for each combination of variant_id, gene_name, and Gene_ID
+combo <- interaction(annotated_snps_df$variant_id, annotated_snps_df$gene_name, annotated_snps_df$Gene_ID, drop = TRUE)
+# We count the occurrences of each combination
+combo_counts <- table(combo)
+# Find which rows belong to a duplicated combination
+dup_mask <- combo_counts[match(combo, names(combo_counts))] > 1
+# Filter out rows where Annotation_Type is "1-5Kb Upstream" *only* if they are duplicated
+annotated_snps_df <- annotated_snps_df[!(dup_mask & annotated_snps_df$Annotation_Type == "1-5Kb Upstream"), ]
+
+# now we can calculate number of isoform transcripts affected for each unique annotations_type (i.e. CDS, 5-3'UTR, Intron, Promoter, 1-5kb upstream) for each variant in a gene
+annotated_snps_df$affected_isoforms_per_variant <- ave(annotated_snps_df$Gene_ID, annotated_snps_df$variant_id, annotated_snps_df$Annotation_Type, annotated_snps_df$gene_name, FUN = function(x) length(unique(x))) # Function calculates the length of each occurrence
+# Since number of isoform transcripts affected by "exon" is not unique as exons are already CDS and UTR, we set variants with "Exon" only at 0, but not for those that have onnly a Exon. Since these synonymous mutations and nothing else.
+# First identify variants where the only Annotation_Type is "Exon" only
+variants_with_only_exon <- tapply(annotated_snps_df$Annotation_Type, annotated_snps_df$variant_id, FUN = function(x) all(unique(x) == "Exon"))
+# Get variant IDs where this condition is TRUE
+variants_to_keep <- names(variants_with_only_exon[variants_with_only_exon])
+# For all variant_ids that contain "Exon" but are NOT in variants_to_keep, set affected_isoforms_per_variant to 0
+annotated_snps_df$affected_isoforms_per_variant <- ifelse(annotated_snps_df$variant_id %in% variants_to_keep, annotated_snps_df$affected_isoforms_per_variant,
+                                                          ifelse(annotated_snps_df$Annotation_Type == "Exon", 0, annotated_snps_df$affected_isoforms_per_variant))
+
+# Calculate the most affected gene for each annotations_type unique (CDS, 5-3'UTR, Intron, Promoter, 1-5kb upstream), not counting exon as these are UTR and CDS
+annotated_snps_df$affected_gene_for_each_AnnotationType <- ave(annotated_snps_df$Annotation_Type, 
+                                            annotated_snps_df$gene_name, 
+                                            FUN = function(x) length(unique(x[x != "Exon"])))
+# Set those with only 1 "exon" (i.e. no cds and/or UTR) to 1, as these are now labeled as 0 occurrence
+annotated_snps_df$affected_gene_for_each_AnnotationType[annotated_snps_df$affected_gene_for_each_AnnotationType == 0] <- 1
+
+# Calculate the most affected gene in terms of number of variants detected for it (mutations)
+annotated_snps_df$gene_mutation_count_for_a_variant <- ave(annotated_snps_df$variant_id, annotated_snps_df$gene_name, 
+                                        FUN = function(x) length(unique(x)))
+
+# make all these new calculated columns above as numeric
+annotated_snps_df$detected_isoforms_per_gene <- as.numeric(annotated_snps_df$detected_isoforms_per_gene)
+annotated_snps_df$affected_isoforms_per_variant <- as.numeric(annotated_snps_df$affected_isoforms_per_variant)
+annotated_snps_df$affected_gene_for_each_AnnotationType <- as.numeric(annotated_snps_df$affected_gene_for_each_AnnotationType)
+annotated_snps_df$gene_mutation_count_for_a_variant <- as.numeric(annotated_snps_df$gene_mutation_count_for_a_variant)
+annotated_snps_df$total_isoforms <- as.numeric(annotated_snps_df$total_isoforms)
+
+
+
+#################### Chunk #################### 
+# // Now with everything annotated, we remove duplicates that have the exact same variant_id, gene_name, and annotation type
+# // The reason why we do this is that some variant are in genes that can have multiple splice version (isotopes). Since they have the same gene names, we can just remove them
+# // Variants that are in unique splice version are not removes (i.e. variant in UTR, Intron, Exon of same gene with different splice version)
+# // Annotated variants that are unique will not be removed!!! But these can be duplicates in terms of being Exon, but also a UTR, so 2 in total
+# // We will in addition, calculate the total number of affected gene/isofrom for each gene given the number of variants detected. Since now all genes have an isophorm detected, the calculated number only affect the gene. For those that have an isoform, we simply sum up the total number of isoforms affected for all variants afecting a the gene
+####################       ####################
+
+# Define the grouping columns
+group_cols <- c("variant_id", "Annotation_Type", "gene_name")
+unique(annotated_snps_df$gene_name)
+########## Function ########## 
+# // Function to check number of counts of non-NA, non-empty values in a row
+# // We do this in order to sort annotated_snps_df by group columns first, then by number of NAs (descending)
+# // By doing so we can remove duolicated variant annotations due to multiple version of a gene (alternative splicing), as multiple informs contains NAs
+# // With this sloppy method, we also maintian most information for each unique annotation 
+count_non_na <- function(row) sum(!is.na(row) & row != "")
+# Run function to see how many NA columns per row
+completeness_scores <- apply(annotated_snps_df, 1, count_non_na)
+
+# Order annotated_snps_df by group columns first, then by number of NAs (descending)
+annotated_snps_df <- annotated_snps_df[order(
+  annotated_snps_df$variant_id, 
+  annotated_snps_df$Annotation_Type, 
+  annotated_snps_df$gene_name, 
+  -completeness_scores  # Negative sign ensures descending order
+), ]
+
+# Remove duplicates, keeping the first occurrence (most complete row)
+annotated_snps_df <- annotated_snps_df[!duplicated(annotated_snps_df[, group_cols]), ]
+
+# Do left join to bring in matching columns from test_results (variants with FDR = 0)
+annotated_snps_df <- merge(test_results[, c("variant_id", "CHROM", "POS", "REF", "ALT", "FLANKSEQ")], 
+                   annotated_snps_df, 
+                   by = "variant_id", 
+                   all.y = TRUE)  # Ensures all rows from annotated_snps_df are kept
+# Remove unnecessary columns and fix CHROM names
+annotated_snps_df$seq_name <- NULL
+
+# Put CHROM name back to original name (i.e. L2 instead of chrL2) 
+# NOTE: ONLY DO THIS WHEN LEVARAGING txdb <- TxDb.Dmelanogaster.UCSC.dm6.ensGene
+#annotated_snps_df$CHROM <- gsub("^chr", "", annotated_snps_df$CHROM)
+#test_results_sig$CHROM <- gsub("^chr", "", test_results_sig$CHROM)
+#test_results$CHROM <- gsub("^chr", "", test_results$CHROM)
+
+######### ONLY RUN THIS CODE IF Cog8 is NOT ANNOTATED CORRECLTY ##########
+######### This code is not general purpose and must be removed in future attempts #########
+# Fix missing gene name (only for Cog8)
+# Copy values from row 11 to row 12 for selected columns
+#annotated_snps_df[12, c("gene_name", "gene_biotype", "description")] <- 
+#  annotated_snps_df[11, c("gene_name", "gene_biotype", "description")]
+
+# Calculate the total number of affected gene/isofrom for each gene given the number of variants detected
+# To do so, we compute sum of affected_isoforms_per_variant for each gene_name
+# Compute sum of affected_isoforms_per_variant per gene_name
+sum_affected_isoforms <- tapply(annotated_snps_df$affected_isoforms_per_variant, annotated_snps_df$gene_name, 
+                                sum, na.rm = TRUE)
+# Map the summed values back to annotated_snps_df
+annotated_snps_df$affected_isoforms_for_all_variants <- sum_affected_isoforms[annotated_snps_df$gene_name]
+# Since some genes do not have isoforms, the affected_isoforms_for_all_variants will equal 1, which just means that just one main transcript got affected 
+# To do so, we first identify genes where all detected_isoforms_per_gene == 1
+genes_with_only_one_isoform <- tapply(annotated_snps_df$detected_isoforms_per_gene, annotated_snps_df$gene_name, 
+                                      FUN = function(x) all(x == 1))
+# Get names that meet this condition
+genes_to_modify <- names(genes_with_only_one_isoform[genes_with_only_one_isoform])
+# Adjust out affected_isoforms_for_all_variants column for those genes
+annotated_snps_df$affected_isoforms_for_all_variants <- ifelse(annotated_snps_df$gene_name %in% genes_to_modify, 1, annotated_snps_df$affected_isoforms_for_all_variants) # else it remains as is
+
+
+
+#################### Chunk #################### 
+# // Everything that did not get annotated is an intergenic region and must be annotated correctly
+# // These unannotated (intergenics) are parsed from test_results and appended in annotated_snps_df
+####################       ####################
+
+# Find non-matching variant_ids in those in test_results but NOT in annotated_snps_df. These are essentially the intergenic variants
+non_matching_variants <- test_results[!(test_results$variant_id %in% annotated_snps_df$variant_id), ]
+# Select relevant columns from test_results
+non_matching_variants <- non_matching_variants[, c("variant_id", "CHROM", "POS", "REF", "ALT", "FLANKSEQ")]
+# Add the non-matching variants to annotated_snps_df
+setDT(annotated_snps_df) # make data.table object
+setDT(non_matching_variants) #  make data.table object
+annotated_snps_df <- rbind(annotated_snps_df, non_matching_variants, fill=TRUE) # fill=TRUE fills missing columns
+# Replace NA values in Annotation_Type with "Intergenic"
+annotated_snps_df$Annotation_Type[is.na(annotated_snps_df$Annotation_Type)] <- "Intergenic"
+
+
+
+# remove old objects
+rm(txdb)
+rm(promoters)
+rm(upstream_1to5kb)
+rm(fiveUTRs)
+rm(threeUTRs)
+rm(cds_regions)
+rm(exons)
+rm(intergenic_regions)
+rm(gene_strand)
+rm(introns)
+rm(test_results_gr)
+rm(annotate_overlap)
+rm(annotations_list)
+rm(idx)
+
+rm(ann.hub)
+rm(ann.hub.database)
+rm(id)
+rm(ensembl.database)
+rm(annotations)
+
+rm(merged_df_gene_id)
+rm(merged_df_canonical)
+rm(missing_gene_names)
+rm(group_cols)
+rm(count_non_na)
+rm(completeness_scores)
+rm(i)
+rm(match_idx)
+rm(matched_genes)
+rm(merged_df)
+rm(flybase_missing_annotation)
+rm(final_merged_df)
+rm(df)
+rm(annotated_snps)
+rm(non_matching_variants)
+
+rm(variants_with_only_exon)
+rm(variants_to_keep)
+rm(sum_affected_isoforms)
+
+rm(genes_with_only_one_isoform)
+rm(genes_to_modify)
+rm(isoform_counts)
+rm(test_results)
+rm(tx_by_gene)
+rm(dup_mask)
+rm(combo)
+rm(combo_counts)
+
+#################### Chunk #################### 
+# // Here we evaluate the functional impact of exonic variants (e.g. missense vs. synonymous mutations)
+# // We will classify them into the following categories:
+# -- Missense (amino acid change)
+# -- Synonymous (silent mutation)
+# -- Nonsense (premature stop codon)
+# // We make use of "VariantAnnotation" package and the "BSgenome.Dmelanogaster.UCSC.dm6" which is compatible with BDGP6.nn ENSEMBLE releases (doscumentation: https://bioconductor.org/packages/devel/bioc/vignettes/VariantAnnotation/inst/doc/VariantAnnotation.html)
+# // While TxDb.Dmelanogaster.UCSC.dm6 uses the UCSC gene models, it uses the same reference genome as BDGP6.nn ENSEMBLE releases, but we UCSC-based workflow (e.g. change uses chr2L, chrX)
+# // NOTE: The REF and ALT nucleotides might not match the annotated codon because they might be in the + or - strand. If you check the + or - strand they always match!
+####################       ####################
+
+# First we Extract only variants labeled as CDS, Which are all exons, but not exons that are not CDS, some exons are UTR
+cds_variants <- annotated_snps_df %>%
+  filter(Annotation_Type == "CDS")
+# Change chromosome names to match dm6 assembly, so chromosome "2L" becomes chr2L. We do this to ensure compatibility when parsing
+# Only do this when leverage the BSgenome.Dmelanogaster.UCSC.dm6 and TxDb.Dmelanogaster.UCSC.dm6.ensGene
+#cds_variants$CHROM <- paste0("chr", cds_variants$CHROM) # DO NOT RUN THIS TWICE FOR FUCK SAKE!!!
+
+# Drosophila reference genome adn transcriptome
+#genome <- BSgenome.Dmelanogaster.UCSC.dm6 # This is compatible without our BDGP6.nn ENSEMBLE and provides reference sequence (FASTA).
+#txdb <- TxDb.Dmelanogaster.UCSC.dm6.ensGene # Provides gene structure data (exons, transcripts, CDS).
+#seqlevelsStyle(genome) == seqlevelsStyle(txdb) # Check if they match, should see TRUE. If not MATCH then switch to Ensembl’s FASTA and GTF to ensure consistency
+
+# Or own from ENSAMBL using for variant calling 
+indexFa("/Users/hamid/Downloads/Drosophila_melanogaster.BDGP6.46.dna.toplevel.fa")
+genome <- FaFile("/Users/hamid/Downloads/Drosophila_melanogaster.BDGP6.46.dna.toplevel.fa")  # Replace with your Ensembl FASTA using library(Rsamtools)
+txdb <- makeTxDbFromGFF("/Users/hamid/Desktop/GEN MSc Project/HackFlex test/Indexed bams (H200:B200 12:16 cycles)/1. Dros fa:gtf/Drosophila_melanogaster.BDGP6.46.112.sorted.gtf", organism = "Drosophila melanogaster") # Or from our own .gtf from ensambl
+seqlevelsStyle(genome) == seqlevelsStyle(txdb) # Check if they match, should see TRUE. If not MATCH then switch to Ensembl’s FASTA and GTF to ensure consistency
+
+# We convert exon variants into VRanges format for functional annotation
+vr_cds <- VRanges(
+  seqnames = cds_variants$CHROM,
+  ranges = IRanges(start = cds_variants$POS, end = cds_variants$POS),
+  ref = cds_variants$REF,
+  alt = cds_variants$ALT,
+  sampleNames = cds_variants$variant_id # We use our unique variant_id to prevent duplication problems
+)
+# Annotate coding impact
+coding_changes <- predictCoding(vr_cds, txdb, seqSource = genome)
+
+# Extract functional consequence
+# Convert coding_changes (GRanges) to a DataFrame
+coding_changes_df <- as.data.frame(coding_changes)
+# Remove duplicated rows (our exon annotations got annotated twice because some of the were detected as CDS and Exon, so annotated twice and multiple times for each splice version of the gene)
+# We leverage the QUERYID to detect duplicated annotations as these correspond to the cds_variants row numbers 
+# These duplication corespond with affected isofroms, but we have already taken this into acount from before
+coding_changes_df <- coding_changes_df %>% distinct(QUERYID, .keep_all = TRUE)
+
+# Add row numbers as a column in cds_variants for merging, we do this because QUERYID column in coding_changes_df correspond to the row numbers in cds_variants. We need to do this for successful merging based on this column
+cds_variants <- cds_variants %>% mutate(QUERYID = row_number())  # Assigns row index as QUERYID
+# Make QUERYID as an integer for correct matching
+cds_variants$QUERYID <- as.integer(cds_variants$QUERYID)
+coding_changes_df$QUERYID <- as.integer(coding_changes_df$QUERYID)
+
+# Merge coding impact results back into cds_variants
+cds_variants <- cds_variants %>% left_join(coding_changes_df %>% 
+ dplyr::select(QUERYID, CONSEQUENCE, REFCODON, VARCODON, REFAA, VARAA), by = "QUERYID")
+# Remove unnecessary QUERYID column again
+cds_variants$QUERYID <- NULL
+
+# Now merge it back to our original annotated_snps_df
+annotated_snps_df <- annotated_snps_df %>% 
+  left_join(cds_variants %>% dplyr::select(variant_id, POS, Annotation_Type, gene_name, description, CONSEQUENCE, REFCODON, VARCODON, REFAA, VARAA), 
+    by = c("variant_id", "POS", "Annotation_Type", "gene_name", "description"))
+
+# Remove old files
+rm(cds_variants)
+rm(genome)
+rm(vr_cds)
+rm(txdb)
+rm(coding_changes)
+rm(coding_changes_df)
+
+
+
+#################### Chunk #################### 
+# // Detect premature termination codons or affected stop codons in CDS
+####################       ####################
+
+# Assign known stop codons
+stop_codons <- c("TAA", "TAG", "TGA")
+# Add new columns to check for stop codon effects
+annotated_snps_df <- annotated_snps_df %>%
+  mutate(Introduced_Stop = ifelse(!(REFCODON %in% stop_codons) & (VARCODON %in% stop_codons), "Yes", "No"), Changed_Stop = ifelse((REFCODON %in% stop_codons) & !(VARCODON %in% stop_codons), "Yes", "No"))
+
+rm(stop_codons)
+
+
+
+#################### Chunk #################### 
+# // Find affected splice sites within introns
+# // These will be canonical splice sites, whih are Essential splice sites are at intronic positions: the donor site (5’ GT) at the intron start and the acceptor site (3’ AG) at the intron end.
+####################       ####################
+
+check_splice_sites <- function(annotated_snps_df) {
+  # Load genome and annotations
+  txdb <- makeTxDbFromGFF("/Users/hamid/Desktop/GEN MSc Project/HackFlex test/Indexed bams (H200:B200 12:16 cycles)/1. Dros fa:gtf/Drosophila_melanogaster.BDGP6.46.112.sorted.gtf", organism = "Drosophila melanogaster") # Or from our own .gtf from ensambl
+  exons <- exons(txdb)
+  introns <- intronsByTranscript(txdb, use.names=TRUE)
+
+  # Filter for intronic variants only in out annotated_snps_df
+  intronic_snps <- subset(annotated_snps_df, Annotation_Type == "Intron")
+
+  # Convert the variants (SNPS) to GRanges object
+  snps_gr <- GRanges(
+    seqnames = intronic_snps$CHROM,
+    ranges = IRanges(start = intronic_snps$POS, end = intronic_snps$POS),
+    gene_name = intronic_snps$gene_name
+  )
+
+  # Define splice sites (donor = start of intron, acceptor = end of intron)
+  splice_donor <- resize(introns, width = 2, fix = "start")  # First 2 bases of intron, which is the splice donor (GT)
+  splice_acceptor <- resize(introns, width = 2, fix = "end")  # Last 2 bases of intron, which is the plice acceptor (AG)
+
+  # Find overlaps between SNPs and splice sites
+  donor_hits <- findOverlaps(snps_gr, splice_donor)
+  acceptor_hits <- findOverlaps(snps_gr, splice_acceptor)
+
+  # Create a new column indicating splice site effect, and mark variants affecting donor and acceptor sites
+  intronic_snps$Splice_Site_Effect <- "No"
+  intronic_snps$Splice_Site_Effect[queryHits(donor_hits)] <- "Disrupts Donor"
+  intronic_snps$Splice_Site_Effect[queryHits(acceptor_hits)] <- "Disrupts Acceptor"
+
+  return(intronic_snps)
+}
+
+# Assuming your input dataframe is annotated_snps_df
+result_df <- check_splice_sites(annotated_snps_df)
+# Merge with original annotated_snps_df
+annotated_snps_df <- merge(
+  annotated_snps_df, 
+  result_df[, c("variant_id", "CHROM", "POS", "gene_name", "Annotation_Type", "Splice_Site_Effect")], 
+  by = c("variant_id", "CHROM", "POS", "gene_name", "Annotation_Type"), 
+  all.x = TRUE
+)
+
+rm(check_splice_sites)
+rm(result_df)
+
+
+
+
+annotated_snps_df$Regulatory <- ifelse(
+  annotated_snps_df$variant_id %in% c("2R_5482939_T", "2R_5483117_G"),
+  "No",
+  "Yes"
+)
+
+write_xlsx(annotated_snps_df, "/Users/hamid/Desktop/Presentie insect/Suplementary table/Supplementary_Table_2.xlsx")
+
+
+annotated_snps_df <- annotated_snps_df %>%
+  filter(!(Annotation_Type %in% c("1-5Kb Upstream", "Promoter") & regulatory == "no"))
+
+length(unique(annotated_snps_df$gene_name))
+
+#################### Chunk #################### 
+# // Find overlap of our candidate genes inside GenAge Model Organisms (Drosphila)
+# // We use the GenAge Build 21: Release Notes
+# // We use topR package for genomic visualization
+# // We also check for allele frequency differences between the CE and CL lines
+####################       ####################
+
+# Load in Aging genes:
+aging_genes <- read.csv("/Users/hamid/Desktop/GEN MSc Project/Data/models_genes/genage_models.csv")
+# Only keep Drosophila model organism
+aging_genes <- aging_genes %>%
+  filter(organism == "Drosophila melanogaster")
+# Check for matching genes between our annotated genes in variants and the GenAge databse
+matching_genes <- intersect(unique(annotated_snps_df$gene_name), aging_genes$symbol)
+matching_genes
+
+rm(aging_genes)
+rm(matching_genes)
+
+
+
+#################### Chunk #################### 
+# // Compare overlappping SNPs between ours an Hoedjes 2019
+####################       ####################
+
+install.packages("openxlsx")
+library(openxlsx)
+hoedjes_vcf <- read.xlsx("/Users/hamid/Desktop/GEN MSc Project/Data/Hoedjes data/Hoedjes_data.xlsx")
+# Make FDR reproduction nummeric and only keep those with a 0
+hoedjes_vcf$FDR.reproduction <- as.numeric(hoedjes_vcf$FDR.reproduction)
+hoedjes_vcf <- hoedjes_vcf %>% filter(FDR.reproduction == 0)
+
+# Find overlapping rows based on Chromosome and Position
+overlapping_rows <- inner_join(annotated_snps_df, hoedjes_vcf, by = c("gene_name" = "Gene.name.1"))
+overlapping_rows <- inner_join(annotated_snps_df, hoedjes_vcf, by = c("POS" = "Position"))
+overlapping_rows <- inner_join(test_results, hoedjes_vcf, by = c("POS" = "Position"))
+unique(overlapping_rows$gene_name)
+
+```
+
+
+#  visulization of annotation
+```{r Data analysi, fig.height=15, fig.width=8, echo=FALSE, warning=FALSE, message=FALSE}
+# fig.height=3.5, fig.width=6.5 default
+
+#################### Chunk #################### 
+# // Here we will visualize the distribution of our annotated variants
+# // We look at the distribution of  "Intergenic", "1-5Kb Upstream", "Promoter", "3'UTR", "5'UTR", "Exon", "CDS", "Intron"
+####################       ####################
+
+# custom order for Annotation_Type
+annotation_type_order <- c("Intergenic", "1-5Kb Upstream", "Promoter", 
+                           "3'UTR", "5'UTR", "Exon", "CDS", "Intron")
+# Summarize variant counts by annotation type and gene_biotype
+annotation_counts <- annotated_snps_df %>%
+  mutate(gene_biotype = replace_na(gene_biotype, "Unknown"),  # Replace NA with "Unknown"
+         Annotation_Type = factor(Annotation_Type, levels = annotation_type_order)) %>%  # Set custom order
+  group_by(Annotation_Type, gene_biotype) %>%
+  summarise(Variant_Count = n(), .groups = "drop")
+
+# Plot the distribution, but only show the number on bars for protein_coding to precent cluthering
+ggplot(annotation_counts, aes(x = Annotation_Type, y = Variant_Count, fill = gene_biotype)) +
+  geom_bar(stat = "identity", position = "stack", width = 0.7) +  # Stacked bars
+  scale_fill_brewer(palette = "Paired") +  # Use a visually distinct color palette
+  theme_minimal(base_size = 14) +  # Set base font size for readability
+  labs(title = "Nested Distribution of Variants Across Annotation Types",
+       x = "Annotation Type",
+       y = "Variant Count",
+       fill = "Gene Biotype") +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = 14),  # Tilt x-axis labels for readability
+    axis.text.y = element_text(size = 12),
+    axis.title = element_text(size = 12, face = "bold"),
+    plot.title = element_text(size = 12, face = "bold", hjust = 0.5),
+    legend.title = element_text(size = 12, face = "bold"),
+    legend.text = element_text(size = 12),
+    legend.position = "right",
+    panel.grid.major = element_line(size = 0.5, linetype = "dashed", color = "grey80"),  # Subtle grid lines
+    panel.grid.minor = element_blank(),  # Remove minor grid lines
+    panel.background = element_blank()  # Remove background shading
+  ) +
+  geom_text(aes(label = ifelse(gene_biotype  %in% c("protein_coding", "ncRNA", "transposable_element", "tRNA", "Unknown"), Variant_Count, "")),  # Show only for protein_coding
+            position = position_stack(vjust = 0.5),  # Center text in stack
+            size = 3)  # Make text smaller to avoid clutter
+
+rm(annotation_counts)
+rm(annotation_type_order)
+
+
+
+#################### Chunk #################### 
+# // We reveal the effect of synonymous and nonsynonymous variants as well
+# // For each affected gene per variant we show the codon and amino acid transition
+# // We also check if an premature stop codon has been introduced or an original stop codon has been lost
+####################       ####################
+
+# Now Filter only non-synonymous (missense) mutations and summarize transitions
+missense_table <- annotated_snps_df %>%
+  filter(CONSEQUENCE == "nonsynonymous" & !is.na(REFCODON) & !is.na(VARCODON) & !is.na(REFAA) & !is.na(VARAA)) %>%
+  group_by(gene_name, REFCODON, VARCODON, REFAA, VARAA) %>%
+  summarise(Variant_Count = n(), .groups = "drop") %>%
+  mutate(
+    Codon_Transition = paste0(REFCODON, " → ", VARCODON),  # Codon change
+    AA_Transition = paste0(REFAA, " → ", VARAA)  # Amino acid change
+  ) %>%
+  dplyr::select(gene_name, Codon_Transition, AA_Transition, Variant_Count) %>%  # Select relevant columns
+  arrange(desc(Variant_Count))  # Sort by most frequent mutations
+
+# Display as a formatted table
+missense_table %>%
+  kable(format = "html", caption = "Missense Mutation Transitions Per Gene") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"), full_width = F, position = "center")
+
+rm(missense_table)
+rm(unique_genes)
+
+
+# Mutation Count Comparison (Synonymous vs. Nonsynonymous)
+mutation_counts <- annotated_snps_df %>%
+  filter(CONSEQUENCE %in% c("synonymous", "nonsynonymous")) %>%
+  dplyr::count(CONSEQUENCE) %>%
+  rename(Mutation_Type = CONSEQUENCE)
+# Add the Stop-Gain and Stop-Loss counts and calculate the number of "yes" observed for each CDS
+stop_gain_count <- sum(annotated_snps_df$Introduced_Stop == "Yes", na.rm = TRUE)
+stop_loss_count <- sum(annotated_snps_df$Changed_Stop == "Yes", na.rm = TRUE)
+# Append mutation counts
+mutation_counts <- mutation_counts %>%
+  add_row(Mutation_Type = "Stop-Gain", n = stop_gain_count) %>%
+  add_row(Mutation_Type = "Stop-Loss", n = stop_loss_count)
+# Reorder mutation types we want in the bar plot in the desired order
+mutation_counts$Mutation_Type <- factor(mutation_counts$Mutation_Type, levels = c("synonymous", "nonsynonymous", "Stop-Gain", "Stop-Loss"))
+
+# Set y-axis extends slightly higher to avoid title clashing
+max_count <- max(mutation_counts$n)
+max_count <- max(mutation_counts$n)
+y_limit <- max_count + 5  
+# We select the colors here for the bar plot for each variable
+mutation_colors <- c(
+  "synonymous" = "#66c2a5", 
+  "nonsynonymous" = "#fc8d62", 
+  "Stop-Gain" = "#8da0cb", 
+  "Stop-Loss" = "#e78ac3"
+)
+# Make the Plot
+plot1 <- ggplot(mutation_counts, aes(x = Mutation_Type, y = n, fill = Mutation_Type)) +
+  geom_bar(stat = "identity", width = 0.6) +  
+  scale_fill_manual(values = mutation_colors) +  
+  scale_y_continuous(limits = c(0, y_limit)) +  
+  theme_minimal(base_size = 14) +  
+  labs(title = "Synonymous, Nonsynonymous, and Stop Codon Variants",
+       y = "Variant Count") +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
+    axis.text.y = element_text(size = 8),
+    axis.title = element_text(size = 8, face = "bold"),
+    plot.title = element_text(size = 8, face = "bold", hjust = 0.5),
+    panel.grid.major = element_line(size = 0.25, linetype = "dashed", color = "grey80"),  
+    panel.grid.minor = element_blank(),  
+    panel.background = element_blank(),  
+    legend.position = "none"  
+  ) +
+  geom_text(aes(label = n), vjust = -0.5, size = 3)  
+
+# Prepare data for nonsynonymous mutations
+nonsynonymous_data <- annotated_snps_df %>%
+  filter(CONSEQUENCE == "nonsynonymous" & !is.na(affected_isoforms_per_variant) & !is.na(total_isoforms)) %>%
+  mutate(
+    Codon_Transition = paste0(REFCODON, " → ", VARCODON),  # Codon transition
+    AA_Transition = paste0(REFAA, " → ", VARAA),  # Amino acid transition
+    Mutation_Label = paste0(Codon_Transition, "  |  ", AA_Transition))  # Move this to legend
+# Change "gene_name"  to "_2, _3, etc" for duplicates
+nonsynonymous_data$gene_name <- ave(nonsynonymous_data$gene_name, nonsynonymous_data$gene_name, FUN = function(x) ifelse(duplicated(x) | duplicated(x, fromLast = TRUE), paste0(x, "_", seq_along(x)), x))
+# Make all mutation labels to get a unique color
+unique_mutations <- unique(nonsynonymous_data$Mutation_Label)
+color_palette <- RColorBrewer::brewer.pal(min(length(unique_mutations), 12), "Set3") # we choose 12 to acount for 12 genes as we have 12 nonsynonymous
+# Manually ensure all mutations get a distinct color
+mutation_color_map <- setNames(color_palette, unique_mutations)
+max_y_value <- max(nonsynonymous_data$total_isoforms, nonsynonymous_data$affected_isoforms_per_variant, na.rm = TRUE) # find max value for the y-axis to set intervals in the plot
+# Create Lollipop Plot with the genes on the x-axis, number of isoforms affected on y axis and transitions in the legend. Inlcuding total detected isoforms
+plot2 <- ggplot(nonsynonymous_data, aes(x = reorder(gene_name, -total_isoforms))) +
+  geom_bar(aes(y = total_isoforms, fill = "Total Isoforms/Transcripts for Gene"), stat = "identity", width = 0.4, alpha = 0.6) + # add total Isoforms as a background bar with a custom legend
+  geom_segment(aes(xend = gene_name, y = 0, yend = affected_isoforms_per_variant), size = 0.8, color = "grey50") +  # add afected isoforms
+  geom_point(aes(y = affected_isoforms_per_variant, color = Mutation_Label), size = 4) +  # add lollipop as basrs
+  geom_text(aes(y = total_isoforms, label = total_isoforms), vjust = 0.5, size = 3, color = "black") + # add labels numbers for total isoforms above the bars
+  scale_y_continuous(breaks = seq(0, max_y_value, by = 2)) + # y axis in steps of 2
+  theme_minimal(base_size = 14) +
+  # make Ccstom Llgend for the Bbckground bar
+  scale_fill_manual(values = c("Total Isoforms/Transcripts for Gene" = "grey80")) +  # Ensure bar appears in legend
+  scale_color_manual(values = mutation_color_map) +  # Ensure all mutations have a color
+  # label titles
+  labs(x = "Gene",y = "Affected Transcripts/Isoforms by Variant",  # Clarify meaning of bars
+       color = "Codon/Amino Acid Transition",
+       fill = "") +  # We dotn fill the legend, thus empty ""
+  # Theme
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 8),  
+    axis.text.y = element_text(size = 8),
+    axis.title = element_text(size = 8, face = "bold"),
+    plot.title = element_text(size = 8, face = "bold", hjust = 1),
+    legend.title = element_text(size = 6, face = "bold"),  # Smaller legend title
+    legend.text = element_text(size = 6),  # Smaller legend labels
+    legend.key.size = unit(0.5, "cm"),  # Reduce legend key size
+    legend.spacing.x = unit(0.3, "cm"),  # Reduce horizontal spacing
+    legend.spacing.y = unit(0.3, "cm"),  # Reduce vertical spacing
+    legend.position = "right",  # Move legend to bottom
+    #legend.box = "horizontal",  # Arrange legend in a single row
+    panel.grid.major = element_line(size = 0.25, linetype = "dashed", color = "grey80"),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank()
+  ) +
+  guides(
+    color = guide_legend(ncol = 2),  #legend in 2 columns to save space
+    fill = guide_legend(ncol = 1)  # Total Isoforms as a separate item
+  )
+# Combine bith plots using Patchworks
+final_plot <- plot1 + plot2 + plot_layout(ncol = 2, widths = c(2, 2))  # Wider second plot
+print(final_plot)
+
+rm(mutation_counts)
+rm(max_count)
+rm(plot1)
+rm(plot2)
+rm(nonsynonymous_data)
+rm(final_plot)
+rm(y_limit)
+rm(max_count)
+rm(unique_mutations)
+rm(color_palette)
+rm(mutation_color_map)
+rm(max_y_value)
+rm(mutation_colors)
+rm(stop_gain_count)
+rm(stop_loss_count)
+```
+

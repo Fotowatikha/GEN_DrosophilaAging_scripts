@@ -1,0 +1,2083 @@
+---
+title: "Hackflex Drosophila - Pilot Head vs Body, Aging CE, and CE vs CL"
+name: Hamid Fotowatikha 
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+# Import packages
+```{r Load Libraries, echo=FALSE, results=FALSE, include=FALSE, include=FALSE}
+library(BiocManager)
+
+# For parsing
+library(tidyr)
+library(dplyr)
+library(dbplyr)
+library(patchwork)
+library(tidyverse)
+library(gsubfn) 
+library(broom.mixed) # For tidying model output
+# for plots
+library(ggplot2)
+library(ggrepel) # ADD THIS TO CONDA
+library(pheatmap) # ADD THIS TO CONDA
+library(ggforce) # ADD THIS TO CONDA
+library(RColorBrewer)
+library(reshape2)
+# Some other packages for gene information extraction from Ensembl
+library(BiocFileCache)
+library(AnnotationHub)
+library(ensembldb)  
+# For annotation, gene name conversions (yes, we include human too)
+#library(rPanglaoDB)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(org.Dm.eg.db)
+library(biomaRt)
+# Save DEGs to excel sheet with gene information
+library(writexl)
+# Deseq2
+BiocManager::install("DESeq2")
+library(DESeq2)
+library(AnnotationDbi)
+library(enrichplot)
+```
+
+
+
+# Perform DEG and GO of HEAD vs BODY
+```{r, fig.height=7, fig.width=5, echo=FALSE, warning=FALSE, message=FALSE}
+
+# Load the two counts files
+head_12 <- read.table("/Users/hamid/Desktop/GEN MSc Project/Data/RNA seq/CE2-12-90H_final.txt", header = TRUE, sep = "\t")
+body_12 <- read.table("/Users/hamid/Desktop/GEN MSc Project/Data/RNA seq/Body/CE2-12-90B_final.txt", header = TRUE, sep = "\t")
+head_16 <- read.table("/Users/hamid/Desktop/GEN MSc Project/Data/RNA seq/CE2-34-90H_final.txt", header = TRUE, sep = "\t")
+body_16 <- read.table("/Users/hamid/Desktop/GEN MSc Project/Data/RNA seq/Body/CE2-34-90B_final.txt", header = TRUE, sep = "\t")
+
+# Fix gene names
+ann.hub <- AnnotationHub(ask = FALSE)
+# Access the Ensembl database for pig
+ann.hub.database <- query(ann.hub, pattern = c("Drosophila melanogaster", "EnsDb"), ignore.case = TRUE)
+# Acquire the latest annotation files ID
+id <- ann.hub.database %>%
+        mcols() %>%
+        rownames() %>%
+        tail(n = 1)
+# Downloading the Ensembldb database
+ensembl.database <- ann.hub[[id]]
+# Extract gene-level information from the database
+annotations <- genes(ensembl.database, 
+                     return.type = "data.frame")
+# Select annotations of interest
+annotations <- annotations %>%
+        dplyr::select(gene_id, gene_name, seq_name, gene_biotype, description)
+
+
+# Rename the column in annotations for consistency so that we can merge
+colnames(annotations)[1] <- "Geneid"
+# Merge annotations with the head counts
+head_annotated_12 <- merge(
+  x = head_12, 
+  y = annotations[, c("Geneid", "gene_name",  'seq_name', 'gene_biotype', 'description')], 
+  by.x = "Geneid", 
+  by.y = "Geneid", 
+  all.x = TRUE
+)
+# Merge annotations with the body counts
+body_annotated_12 <- merge(
+  x = body_12, 
+  y = annotations[, c("Geneid", "gene_name",  'seq_name', 'gene_biotype', 'description')], 
+  by.x = "Geneid", 
+  by.y = "Geneid", 
+  all.x = TRUE
+)
+head_annotated_16 <- merge(
+  x = head_16, 
+  y = annotations[, c("Geneid", "gene_name",  'seq_name', 'gene_biotype', 'description')], 
+  by.x = "Geneid", 
+  by.y = "Geneid", 
+  all.x = TRUE
+)
+# Merge annotations with the body counts
+body_annotated_16 <- merge(
+  x = body_16, 
+  y = annotations[, c("Geneid", "gene_name",  'seq_name', 'gene_biotype', 'description')], 
+  by.x = "Geneid", 
+  by.y = "Geneid", 
+  all.x = TRUE
+)
+
+
+
+#### DEG #####
+# Combine the counts for H200 (head) and B200 (body) into a single matrix
+counts_matrix <- data.frame(
+  CE2_90_Head_1 = head_annotated_12$CE2.12.90H.mapped_minOverLread.Aligned.sortedByCoord.out.bam,
+  CE2_90_Body_1 = body_annotated_12$CE2.12.90B.mapped_minOverLread.Aligned.sortedByCoord.out.bam,
+  CE2_90_Head_2 = head_annotated_16$CE2.34.90H.mapped_minOverLread.Aligned.sortedByCoord.out.bam,
+  CE2_90_Body_2 = body_annotated_16$CE2.34.90B.mapped_minOverLread.Aligned.sortedByCoord.out.bam
+)
+# Remove duplicates by keeping only the first occurrence
+unique_gene_names <- make.unique(as.character(head_annotated_12$gene_name))
+# Assign the unique gene names as row names
+rownames(counts_matrix) <- unique_gene_names
+
+# Remove rows with missing gene names or zero counts or below 5
+counts_matrix <- counts_matrix[complete.cases(counts_matrix), ]
+counts_matrix <- counts_matrix[rowSums(counts_matrix) > 5, ] # count above 5
+
+# DESEQ2
+# Define metadata for samples
+sample_metadata <- data.frame(
+  row.names = c("CE2_90_Head_1", "CE2_90_Body_1", "CE2_90_Head_2", "CE2_90_Body_2"),
+  condition = c("Head", "Body", "Head", "Body")  # Define the sample groups
+)
+counts_matrix <- round(counts_matrix) # round the count 
+# Create DESeq2 dataset
+dds <- DESeqDataSetFromMatrix(
+  countData = counts_matrix,
+  colData = sample_metadata,
+  design = ~ condition
+)
+# View the DESeq2 dataset
+dds
+
+# Run the DESeq2 pipeline
+dds <- DESeq(dds)
+# Extract results
+results_dge <- results(dds)
+# Add annotations to the results
+results_dge$GeneName <- rownames(results_dge)
+results_dge$Description <- head_annotated_12$description[match(rownames(results_dge), head_annotated_12$gene_name)]
+# View the top results
+head(results_dge[order(results_dge$padj), ])
+
+# MA Plot
+plotMA(results_dge, main = "MA Plot: Head vs Body", ylim = c(-2, 2))
+# Add a significance flag
+results_dge$Significant <- ifelse(results_dge$padj < 0.05, "Significant", "Not Significant")
+# Volcano Plot
+# Enhanced Volcano Plot
+ggplot(results_dge, aes(x = log2FoldChange, y = -log10(padj), color = Significant)) +
+  geom_point(alpha = 0.6, size = 1.5) + # Increased point size for visibility
+  scale_color_manual(
+    values = c("grey70", "firebrick"),
+    labels = c("Not Significant", "Significant") # Clear legend labels
+  ) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "blue", size = 0.8) + # P-value threshold line
+  geom_vline(xintercept = c(-3, 3), linetype = "dashed", color = "blue", size = 0.8) + # Fold change thresholds
+  labs(
+    title = "Volcano Plot: Head vs Body",
+    subtitle = "Differential Gene Expression Analysis",
+    x = expression(Log[2] * " Fold Change"),
+    y = expression("-Log"[10] * " Adjusted P-value"),
+    color = "Gene Significance" # Legend title
+  ) +
+  theme_classic(base_size = 14) + # Classic theme for a clean look
+  theme(
+    plot.title = element_text(face = "bold", size = 16, hjust = 0.5),
+    plot.subtitle = element_text(size = 12, hjust = 0.5, color = "darkgray"),
+    axis.title = element_text(face = "bold"),
+    axis.text = element_text(color = "black"),
+    legend.position = "top", # Move legend to the top
+    legend.title = element_text(face = "bold")
+  )
+
+length(rownames(top_degs))
+# HEATMAP
+# Subset top DEGs (adjusted p-value < 0.05)
+top_degs <- results_dge[order(results_dge$padj), ]
+top_degs <- top_degs[!is.na(top_degs$padj) & top_degs$padj < 0.05, ]
+# Select top 50 DEGs
+top50 <- head(top_degs, 20)
+# View selected DEGs
+head(top50)
+# Extract normalized counts for the top 50 DEGs
+normalized_counts <- counts(dds, normalized = TRUE)
+heatmap_data <- normalized_counts[rownames(normalized_counts) %in% rownames(top50), ]
+# Scale the counts for better visualization
+heatmap_data_scaled <- t(scale(t(heatmap_data)))
+# View heatmap data
+head(heatmap_data_scaled)
+# Create the heatmap
+pheatmap(
+  heatmap_data_scaled,
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  show_rownames = TRUE,
+  annotation_col = sample_metadata,
+  main = "Heatmap of Top 20 DEGs",
+)
+
+# HEATMAP with predefined gene list
+genes <- c("Mael", "vas", "piwi", "hts", "CycA", "CycE", "orb", "otu", "sxl", "gurken", "exu", "sqh", "kap-α3", "msps", "chk2", "oskar")
+head_up <- results_dge[which(results_dge$padj < 0.05 & results_dge$log2FoldChange > 3), ]
+body_up <- results_dge[which(results_dge$padj < 0.05 & results_dge$log2FoldChange < -3), ]
+# Subset DEGs that match the predefined gene list
+selected_genes <- results_dge[rownames(results_dge) %in% rownames(head_up), ]
+# Ensure there are no NA values in adjusted p-values
+selected_genes <- selected_genes[!is.na(selected_genes$padj), ]
+top20 <- head(selected_genes, 20)
+# Extract normalized counts for the selected genes
+normalized_counts <- counts(dds, normalized = TRUE)
+heatmap_data <- normalized_counts[rownames(normalized_counts) %in% rownames(top20), ]
+# Scale the counts for better visualization
+heatmap_data_scaled <- t(scale(t(heatmap_data)))
+# Create the heatmap
+pheatmap(
+  heatmap_data_scaled,
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  show_rownames = TRUE,
+  annotation_col = sample_metadata,
+  labels_col = c("CE2 90% - Head 1/2", "CE2 90% - Body1/2", "CE2 90% - Head 3/4", "CE2 90% - Body 3/4"), # Replace with your labels
+  main = "Heatmap of Selected Reproductive Genes",
+  angle_col = 45  # Rotate column labels by 45 degrees
+)
+
+
+
+# Run GO analysis separately for each comparison
+# Extract significantly differentially expressed genes (adjusted p-value < 0.05)
+head_up <- results_dge[which(results_dge$padj < 0.05 & results_dge$log2FoldChange > 3), ]
+body_up <- results_dge[which(results_dge$padj < 0.05 & results_dge$log2FoldChange < -3.5), ]
+
+# Combine all extracted dataframes into a list
+# Create a list where each element contains only gene names
+deg_list <- list(
+  "Head Up" = rownames(head_up),
+  "Body Up" = rownames(body_up))
+
+# Prepare the GO KEGG analysis for the DE up-regulated markers using the drosophila database
+for (i in 1: length(deg_list)) {
+  deg_list[[i]] = bitr(deg_list[[i]], fromType="SYMBOL", toType="ENTREZID", OrgDb="org.Dm.eg.db") # org.Hs.eg.db for human
+}
+# do the same here, a line like below for each cluster
+genelist.all.pos <- list()
+for (i in 1: length(deg_list)) {
+  genelist.all.pos[paste(i - 1)] <- list(deg_list[[i]]$ENTREZID)
+}
+# Now manually rename the elements in `genelist.all.pos` AFTER execution in the same order as made
+custom_names <- c("Head Up", "Body Up")
+# Ensure renaming is applied correctly
+if (length(genelist.all.pos) == length(custom_names)) {
+  names(genelist.all.pos) <- custom_names
+}
+
+# Set  fig.height=20, fig.width=7
+# Drosophla DATABSE
+# Do the GO and KEGG on biological process on DE up-regulated markers
+GOclusterplot.all.pos <- compareCluster(geneCluster = genelist.all.pos, fun = "enrichGO", OrgDb = "org.Dm.eg.db", ont = 'BP', pAdjustMethod = "BH", pvalueCutoff  = 0.05, minGSSize = 10, maxGSSize = 500, ) # universe = GO_background_entrez for correct backgorund
+dotplot(GOclusterplot.all.pos, showCategory=6) + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+# Chronological aging in CE2 (pairwise)
+# Perform DEG and GO on real samples 
+```{r, fig.height=6, fig.width=8, echo=FALSE, warning=FALSE, message=FALSE}
+
+# Load the two counts files
+CE2_12_15H <- read.table("/Users/hamid/Desktop/GEN MSc Project/Data/RNA seq/CE2-12-15H_final.txt", header = TRUE, sep = "\t")
+CE2_34_15H <- read.table("/Users/hamid/Desktop/GEN MSc Project/Data/RNA seq/CE2-34-15H_final.txt", header = TRUE, sep = "\t")
+CE2_12_50H <- read.table("/Users/hamid/Desktop/GEN MSc Project/Data/RNA seq/CE2-12-50H_final.txt", header = TRUE, sep = "\t")
+CE2_34_50H <- read.table("/Users/hamid/Desktop/GEN MSc Project/Data/RNA seq/CE2-34-50H_final.txt", header = TRUE, sep = "\t")
+CE2_12_90H <- read.table("/Users/hamid/Desktop/GEN MSc Project/Data/RNA seq/CE2-12-90H_final.txt", header = TRUE, sep = "\t")
+CE2_34_90H <- read.table("/Users/hamid/Desktop/GEN MSc Project/Data/RNA seq/CE2-34-90H_final.txt", header = TRUE, sep = "\t")
+
+
+
+# Fix gene names
+ann.hub <- AnnotationHub(ask = FALSE)
+# Access the Ensembl database for pig
+ann.hub.database <- query(ann.hub, pattern = c("Drosophila melanogaster", "EnsDb"), ignore.case = TRUE)
+# Acquire the latest annotation files ID
+id <- ann.hub.database %>%
+        mcols() %>%
+        rownames() %>%
+        tail(n = 1)
+# Downloading the Ensembldb database
+ensembl.database <- ann.hub[[id]]
+# Extract gene-level information from the database
+annotations <- genes(ensembl.database, 
+                     return.type = "data.frame")
+# Select annotations of interest
+annotations <- annotations %>%
+        dplyr::select(gene_id, gene_name, seq_name, gene_biotype, description)
+
+
+# Rename the column in annotations for consistency so that we can merge
+colnames(annotations)[1] <- "Geneid"
+# Merge annotations with the head counts
+CE2_12_15H <- merge(
+  x = CE2_12_15H, 
+  y = annotations[, c("Geneid", "gene_name",  'seq_name', 'gene_biotype', 'description')], 
+  by.x = "Geneid", 
+  by.y = "Geneid", 
+  all.x = TRUE
+)
+# Merge annotations with the body counts
+CE2_34_15H <- merge(
+  x = CE2_34_15H, 
+  y = annotations[, c("Geneid", "gene_name",  'seq_name', 'gene_biotype', 'description')], 
+  by.x = "Geneid", 
+  by.y = "Geneid", 
+  all.x = TRUE
+)
+CE2_12_50H <- merge(
+  x = CE2_12_50H, 
+  y = annotations[, c("Geneid", "gene_name",  'seq_name', 'gene_biotype', 'description')], 
+  by.x = "Geneid", 
+  by.y = "Geneid", 
+  all.x = TRUE
+)
+# Merge annotations with the body counts
+CE2_34_50H <- merge(
+  x = CE2_34_50H, 
+  y = annotations[, c("Geneid", "gene_name",  'seq_name', 'gene_biotype', 'description')], 
+  by.x = "Geneid", 
+  by.y = "Geneid", 
+  all.x = TRUE
+)
+CE2_12_90H <- merge(
+  x = CE2_12_90H, 
+  y = annotations[, c("Geneid", "gene_name",  'seq_name', 'gene_biotype', 'description')], 
+  by.x = "Geneid", 
+  by.y = "Geneid", 
+  all.x = TRUE
+)
+# Merge annotations with the body counts
+CE2_34_90H <- merge(
+  x = CE2_34_90H, 
+  y = annotations[, c("Geneid", "gene_name",  'seq_name', 'gene_biotype', 'description')], 
+  by.x = "Geneid", 
+  by.y = "Geneid", 
+  all.x = TRUE
+)
+
+
+# Combine the counts for H200 (head) and B200 (body) into a single matrix
+counts_matrix <- data.frame(
+  CE2_12_15H = CE2_12_15H$CE2.12.15H.mapped_minOverLread.Aligned.sortedByCoord.out.bam,
+  CE2_34_15H = CE2_34_15H$CE2.34.15H.mapped_minOverLread.Aligned.sortedByCoord.out.bam,
+  CE2_12_50H = CE2_12_50H$CE2.12.50H.mapped_minOverLread.Aligned.sortedByCoord.out.bam,
+  CE2_34_50H = CE2_34_50H$CE2.34.50H.mapped_minOverLread.Aligned.sortedByCoord.out.bam,
+  CE2_12_90H = CE2_12_90H$CE2.12.90H.mapped_minOverLread.Aligned.sortedByCoord.out.bam,
+  CE2_34_90H = CE2_34_90H$CE2.34.90H.mapped_minOverLread.Aligned.sortedByCoord.out.bam
+)
+# Remove duplicates by keeping only the first occurrence
+unique_gene_names <- make.unique(as.character(CE2_12_15H$gene_name))
+# Assign the unique gene names as row names
+rownames(counts_matrix) <- unique_gene_names
+
+# Remove rows with missing gene names or zero counts or below 5
+counts_matrix <- counts_matrix[complete.cases(counts_matrix), ]
+counts_matrix <- counts_matrix[rowSums(counts_matrix) > 5, ] # count above 5
+
+# Define metadata for samples
+sample_metadata <- data.frame(
+  row.names = c("CE2_12_15H", "CE2_34_15H", "CE2_12_50H", "CE2_34_50H", "CE2_12_90H", "CE2_34_90H"),
+  condition = c("15%", "15%", "50%", "50%", "90%", "90%")  # Define the sample groups
+)
+sample_metadata$condition <- factor(sample_metadata$condition, levels = c("90%", "50%", "15%")) # make factor, The order determines the reference, so 90% is ref
+#counts_matrix <- round(counts_matrix) # round the count 
+
+
+#################### Chunk #################### 
+# // Perform WALD pairwise comparison between survival rates
+# // DESeq2 will compare “50%” vs “90%” and “15%” vs “90%” 
+####################       ####################
+
+# Create DESeq2 dataset
+dds <- DESeqDataSetFromMatrix(
+  countData = counts_matrix,
+  colData = sample_metadata,
+  design = ~ condition
+)
+
+# Run the DESeq2 pipeline
+dds <- DESeq(dds, test = "Wald")
+resultsNames(dds)
+
+# Extract results
+results_dge <- results(dds) # by not specifying contrast the first factor will be come the refference (e.g 90% survival)
+# Add annotations to the results
+results_dge$GeneName <- rownames(results_dge)
+results_dge$Description <- CE2_12_15H$description[match(rownames(results_dge), CE2_12_15H$gene_name)]
+# View the top results
+head(results_dge[order(results_dge$padj), ])
+
+# now subset for each condition individually
+# Extract results for 50% vs 90%
+res_50_vs_90 <- results(dds, contrast = c("condition", "50%", "90%"))
+# Extract results for 15% vs 90%
+res_15_vs_90 <- results(dds, contrast = c("condition", "15%", "90%")) # Gene is higher expressed in the tested group (“15%”) compared to the reference group (“90%”).
+# Extract results for 15% vs 50%
+res_15_vs_50 <- results(dds, contrast = c("condition", "15%", "50%"))
+# Add gene annotations (if available)
+res_50_vs_90$GeneName <- rownames(res_50_vs_90)
+res_15_vs_90$GeneName <- rownames(res_15_vs_90)
+res_15_vs_50$GeneName <- rownames(res_15_vs_50)
+# Add descriptions (if available in CE2_12_15H dataset)
+res_50_vs_90$Description <- CE2_12_15H$description[match(rownames(res_50_vs_90), CE2_12_15H$gene_name)]
+res_15_vs_90$Description <- CE2_12_15H$description[match(rownames(res_15_vs_90), CE2_12_15H$gene_name)]
+res_15_vs_50$Description <- CE2_12_15H$description[match(rownames(res_15_vs_50), CE2_12_15H$gene_name)]
+
+
+
+# MA Plot for all
+plotMA(results_dge, main = "Wlad: 90 to 15 Survival", ylim = c(-2, 2))
+# Add a significance flag
+results_dge$Significant <- ifelse(results_dge$padj < 0.05, "Significant", "Not Significant")
+# Volcano Plot
+# Enhanced Volcano Plot
+ggplot(results_dge, aes(x = log2FoldChange, y = -log10(padj), color = Significant)) +
+  geom_point(alpha = 0.6, size = 1.5) + # Increased point size for visibility
+  scale_color_manual(
+    values = c("grey70", "firebrick"),
+    labels = c("Not Significant", "Significant") # Clear legend labels
+  ) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "blue", size = 0.8) + # P-value threshold line
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "blue", size = 0.8) + # Fold change thresholds
+  labs(
+    title = "Volcano Plot: H200 vs B200",
+    subtitle = "Differential Gene Expression Analysis",
+    x = expression(Log[2] * " Fold Change"),
+    y = expression("-Log"[10] * " Adjusted P-value"),
+    color = "Gene Significance" # Legend title
+  ) +
+  theme_classic(base_size = 14) + # Classic theme for a clean look
+  theme(
+    plot.title = element_text(face = "bold", size = 16, hjust = 0.5),
+    plot.subtitle = element_text(size = 12, hjust = 0.5, color = "darkgray"),
+    axis.title = element_text(face = "bold"),
+    axis.text = element_text(color = "black"),
+    legend.position = "top", # Move legend to the top
+    legend.title = element_text(face = "bold")
+  )
+
+# Function to create an enhanced volcano plot for each condition individually
+library(gridExtra)
+# Function to create an enhanced volcano plot with top 10 gene labels
+volcano_plot <- function(results_dge, title) {
+  # Define significance (padj < 0.05)
+  results_dge$Significant <- ifelse(results_dge$padj < 0.05, "Significant", "Not Significant")
+  
+  # Select the top 10 most significant genes (lowest padj values)
+  top_genes <- results_dge[order(results_dge$padj), ][1:5, ]
+  
+  ggplot(results_dge, aes(x = log2FoldChange, y = -log10(padj), color = Significant)) +
+    geom_point(alpha = 0.6, size = 1.5) +  # Increased point size for visibility
+    scale_color_manual(
+      values = c("grey70", "firebrick"), 
+      labels = c("Not Significant", "Significant")  # Clear legend labels
+    ) +
+    geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "blue", size = 0.8) +  # P-value threshold
+    geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "blue", size = 0.8) +  # Fold change thresholds
+    geom_text(data = top_genes, aes(label = GeneName), vjust = 1, hjust = 0.5, size = 4, color = "black") +  # Add gene labels
+    labs(
+      title = title,
+      subtitle = "Differential Gene Expression Analysis",
+      x = expression(Log[2] * " Fold Change"),
+      y = expression("-Log"[10] * " Adjusted P-value"),
+      color = "Gene Significance"  # Legend title
+    ) +
+    theme_classic(base_size = 14) +  # Classic theme for a clean look
+    theme(
+      plot.title = element_text(face = "bold", size = 16, hjust = 0.5),
+      plot.subtitle = element_text(size = 12, hjust = 0.5, color = "darkgray"),
+      axis.title = element_text(face = "bold"),
+      axis.text = element_text(color = "black"),
+      legend.position = "top",  # Move legend to the top
+      legend.title = element_text(face = "bold")
+    )
+}
+# Generate volcano plots for each comparison
+p1 <- volcano_plot(res_50_vs_90, "Volcano Plot: 50% vs 90% Survival")
+p2 <- volcano_plot(res_15_vs_90, "Volcano Plot: 15% vs 90% Survival")
+p3 <- volcano_plot(res_15_vs_50, "Volcano Plot: 15% vs 50% Survival")
+
+# Show all volcano plots together
+grid.arrange(p1, p2, p3, ncol = 3)
+
+
+# HEATMAP
+# Subset top DEGs (adjusted p-value < 0.05)
+top_degs <- results_dge[order(results_dge$padj), ]
+top_degs <- top_degs[!is.na(top_degs$padj) & top_degs$padj < 0.05, ]
+# Select top 50 DEGs
+top50 <- head(top_degs, 50)
+# View selected DEGs
+head(top50)
+# Extract normalized counts for the top 50 DEGs
+normalized_counts <- counts(dds, normalized = TRUE)
+heatmap_data <- normalized_counts[rownames(normalized_counts) %in% rownames(top50), ]
+# Scale the counts for better visualization
+heatmap_data_scaled <- t(scale(t(heatmap_data)))
+# View heatmap data
+head(heatmap_data_scaled)
+# Create the heatmap
+pheatmap(
+  heatmap_data_scaled,
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  show_rownames = TRUE,
+  annotation_col = sample_metadata,
+  main = "Heatmap of Top 20 DEGs", 
+)
+
+
+
+###### GO Enrich:
+# Convert gene names to Entrez IDs
+degs_entrez <- mapIds(
+  org.Dm.eg.db,
+  keys = rownames(top_degs),
+  column = "ENTREZID",
+  keytype = "SYMBOL",
+  multiVals = "first"
+)
+# Remove NA Entrez IDs
+degs_entrez <- degs_entrez[!is.na(degs_entrez)]
+# Create a named vector of log2 fold changes
+gene_list <- top_degs$log2FoldChange
+names(gene_list) <- degs_entrez
+# Run GO enrichment analysis
+go_results <- enrichGO(
+  gene = degs_entrez,
+  OrgDb = org.Dm.eg.db,
+  keyType = "ENTREZID",
+  ont = "BP", # Biological Processes
+  pvalueCutoff = 0.05,
+  qvalueCutoff = 0.05
+)
+
+# View GO result
+head(go_results)
+
+# Bar plot of GO results
+barplot(go_results, showCategory = 60, title = "Top 10 GO Terms (Biological Processes)")
+
+
+
+
+# Function to perform GO enrichment for a given DESeq2 result
+perform_go_enrichment <- function(res_dge) {
+  # Convert ENSEMBL IDs to ENTREZ IDs
+  degs_entrez <- mapIds(
+    org.Dm.eg.db,
+    keys = rownames(res_dge),  
+    column = "ENTREZID",
+    keytype = "SYMBOL",  
+    multiVals = "first"
+  )
+
+  # Remove NA values
+  degs_entrez <- degs_entrez[!is.na(degs_entrez)]
+
+  # Perform GO enrichment analysis for Biological Process (BP)
+  go_results <- enrichGO(
+    gene = degs_entrez,
+    OrgDb = org.Dm.eg.db,
+    keyType = "ENTREZID",
+    ont = "BP",  
+    pvalueCutoff = 0.05,
+    pAdjustMethod = "BH",
+  )
+  return(go_results)
+}
+
+# Run GO analysis separately for each comparison
+go_50_vs_90 <- perform_go_enrichment(res_50_vs_90[!is.na(res_50_vs_90$padj) & res_50_vs_90$padj < 0.05 & res_50_vs_90$log2FoldChange <= -1, ])
+go_15_vs_90 <- perform_go_enrichment(res_15_vs_90[!is.na(res_15_vs_90$padj) & res_15_vs_90$padj < 0.05 & res_15_vs_90$log2FoldChange >= 1, ])
+go_15_vs_50 <- perform_go_enrichment(res_15_vs_90[!is.na(res_15_vs_90$padj) & res_15_vs_90$padj < 0.05 & res_15_vs_90$log2FoldChange <= -1, ])
+
+# Dot plots for GO enrichment results
+p1 <- dotplot(go_50_vs_90, showCategory = 15) + 
+  ggtitle("GO Enrichment: 50% vs 90% Survival") +
+  theme_minimal()
+
+p2 <- dotplot(go_15_vs_90, showCategory = 30) + 
+  ggtitle("GO Enrichment - Log2FC > 1: 15% vs 90% Survival") +
+  theme_minimal()
+
+p3 <- dotplot(go_15_vs_50, showCategory = 30) + 
+  ggtitle("GO Enrichment Log2FC < 1: 15% vs 90% Survival") +
+  theme_minimal()
+
+# Show all dot plots together
+library(gridExtra)
+grid.arrange( p2, p3, ncol = 2)
+
+p1
+p2
+p3
+
+
+
+
+#################### Chunk #################### 
+# // Perform LRT tests to see whether adding “condition” as a factor improves the model significantly compared to a simpler model
+# // This assumes that gene expression varies between survival rates (90%, 50%, and 15%)
+# // Null Hypothesis: gene expression does not depend on survival rate (i.e., there is no effect of survival rate)
+# // Alternative Hypothesis: gene expression varies between survival rates (90%, 50%, and 15%).
+####################       ####################
+
+
+# Define metadata for samples
+sample_metadata <- data.frame(
+  row.names = c("CE2_12_15H", "CE2_34_15H", "CE2_12_50H", "CE2_34_50H", "CE2_12_90H", "CE2_34_90H"),
+  sample = c("CE2_12", "CE2_34", "CE2_12", "CE2_34", "CE2_12", "CE2_34"),
+  condition = c("15%", "15%", "50%", "50%", "90%", "90%")  # Define the sample groups
+)
+sample_metadata$condition <- factor(sample_metadata$condition, levels = c("90%", "50%", "15%")) 
+
+# Create DESeq2 dataset
+dds <- DESeqDataSetFromMatrix(
+  countData = counts_matrix,
+  colData = sample_metadata,
+  design = ~ sample + condition
+)
+dds_lrt <- DESeq(dds, test = "LRT", reduced = ~sample )  # Run LRT comparing full model to reduced model
+resultsNames(dds_lrt)
+
+# Get results of LRT test
+res_lrt <- results(dds_lrt, alpha = 0.05)
+# Order results by adjusted p-value (FDR corrected)
+res_lrt <- res_lrt[order(res_lrt$padj), ]
+
+# Add annotations to the results
+res_lrt$GeneName <- rownames(res_lrt)
+res_lrt$Description <- CE2_12_15H$description[match(rownames(res_lrt), CE2_12_15H$gene_name)]
+# View the top results
+head(res_lrt[order(res_lrt$padj), ])
+
+# Setup for visualization in a dataframe
+deseq_df <- res_lrt %>%
+  # make into data.frame
+  as.data.frame() %>%
+  # the gene names are row names -- let's make them a column for easy display
+  tibble::rownames_to_column("Gene") %>%
+  # add a column for significance threshold results
+  dplyr::mutate(threshold = padj < 0.05) %>%
+  # sort by statistic -- the highest values will be genes with
+  # higher expression in RPL10 mutated samples
+  dplyr::arrange(dplyr::desc(log2FoldChange))
+
+# Check up and down regulation
+plotCounts(dds_lrt, gene = "CG6938", intgroup = c("condition"))
+
+
+# Extract significantly differentially expressed genes (adjusted p-value < 0.05)
+sig_gene_up <- res_lrt[which(res_lrt$padj < 0.05 & res_lrt$log2FoldChange > 0), ]
+sig_gene_down <- res_lrt[which(res_lrt$padj < 0.05 & res_lrt$log2FoldChange < 0), ]
+rownames(sig_gene_up)
+rownames(sig_gene_down)
+
+
+
+
+# MA Plot for all
+plotMA(res_lrt, main = "DEGs CE2 across Survivial rate (90, 50, 15)", ylim = c(-2, 2))
+# Add a significance flag
+res_lrt$Significant <- ifelse(res_lrt$padj < 0.05, "Significant", "Not Significant")
+# Volcano Plot
+# Enhanced Volcano Plot
+ggplot(res_lrt, aes(x = log2FoldChange, y = -log10(padj), color = Significant)) +
+  geom_point(alpha = 0.6, size = 1.5) + # Increased point size for visibility
+  scale_color_manual(
+    values = c("grey70", "firebrick"),
+    labels = c("Not Significant", "Significant") # Clear legend labels
+  ) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "blue", size = 0.8) + # P-value threshold line
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "blue", size = 0.8) + # Fold change thresholds
+  labs(
+    title = "Volcano Plot: H200 vs B200",
+    subtitle = "Differential Gene Expression Analysis",
+    x = expression(Log[2] * " Fold Change"),
+    y = expression("-Log"[10] * " Adjusted P-value"),
+    color = "Gene Significance" # Legend title
+  ) +
+  theme_classic(base_size = 14) + # Classic theme for a clean look
+  theme(
+    plot.title = element_text(face = "bold", size = 16, hjust = 0.5),
+    plot.subtitle = element_text(size = 12, hjust = 0.5, color = "darkgray"),
+    axis.title = element_text(face = "bold"),
+    axis.text = element_text(color = "black"),
+    legend.position = "top", # Move legend to the top
+    legend.title = element_text(face = "bold")
+  )
+
+
+
+# HEATMAP
+# Subset top DEGs (adjusted p-value < 0.05)
+top_degs <- res_lrt[order(res_lrt$padj), ]
+top_degs <- top_degs[!is.na(top_degs$padj) & top_degs$padj < 0.05, ]
+# Select top 50 DEGs
+top50 <- head(top_degs, 50) # add a number do adjust the number of interesting genes
+# View selected DEGs
+head(top50)
+# Extract normalized counts for the top 50 DEGs
+normalized_counts <- counts(dds_lrt, normalized = TRUE)
+heatmap_data <- normalized_counts[rownames(normalized_counts) %in% rownames(top50), ]
+# Scale the counts for better visualization
+heatmap_data_scaled <- t(scale(t(heatmap_data)))
+# View heatmap data
+head(heatmap_data_scaled)
+# Create the heatmap
+pheatmap(
+  heatmap_data_scaled,
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  show_rownames = TRUE,
+  annotation_col = sample_metadata,
+  main = "Heatmap of Top 20 DEGs", 
+)
+
+
+# Extract significantly differentially expressed genes (adjusted p-value < 0.05)
+sig_lrt <- res_lrt[which(res_lrt$padj < 0.05), ]
+length(sig_lrt$GeneName)
+
+
+
+
+###### GO Enrich:
+# Subset top DEGs (adjusted p-value < 0.05) and differentially upregulated with a log-fold change of >
+
+# Function to perform GO enrichment for a given DESeq2 result
+perform_go_enrichment <- function(res_dge) {
+  # Convert ENSEMBL IDs to ENTREZ IDs
+  degs_entrez <- mapIds(
+    org.Dm.eg.db,
+    keys = rownames(res_dge),  
+    column = "ENTREZID",
+    keytype = "SYMBOL",  
+    multiVals = "first"
+  )
+  # Remove NA values
+  degs_entrez <- degs_entrez[!is.na(degs_entrez)]
+  # Perform GO enrichment analysis for Biological Process (BP)
+  go_results <- enrichGO(
+    gene = degs_entrez,
+    OrgDb = org.Dm.eg.db,
+    keyType = "ENTREZID",
+    ont = "BP",  
+    pvalueCutoff = 0.05,
+    pAdjustMethod = "BH",
+  )
+  return(go_results)
+}
+
+# Run GO analysis separately for each comparison
+go_15_vs_90 <- perform_go_enrichment(res_lrt[!is.na(res_lrt$padj) & res_lrt$padj < 0.05 & res_lrt$log2FoldChange >= 1, ])
+go_15_vs_50 <- perform_go_enrichment(res_lrt[!is.na(res_lrt$padj) & res_lrt$padj < 0.05 & res_lrt$log2FoldChange <= -1, ])
+
+# Dot plots for GO enrichment results
+p2 <- dotplot(go_15_vs_90, showCategory = 12) + 
+  ggtitle("GO Enrichment - Log2FC > 1: 15% vs 90% Survival") +
+  theme_minimal()
+p3 <- dotplot(go_15_vs_50, showCategory = 12) + 
+  ggtitle("GO Enrichment Log2FC < 1: 15% vs 90% Survival") +
+  theme_minimal()
+
+# Show all dot plots together
+library(gridExtra)
+grid.arrange( p2, p3, ncol = 2)
+
+
+
+
+###### Plot expression across survival rate:
+# plot expression across time
+library(reshape2)
+library(ggplot2)
+# Extract significantly differentially expressed genes (adjusted p-value < 0.05)
+sig_gene_up <- res_lrt[which(res_lrt$padj < 0.05 & res_lrt$log2FoldChange > 1), ]
+sig_gene_down <- res_lrt[which(res_lrt$padj < 0.05 & res_lrt$log2FoldChange < -1), ]
+# Extract counts for up/down regulated genes
+counts_up <- counts_matrix[rownames(sig_gene_up), ]
+counts_down <- counts_matrix[rownames(sig_gene_down), ]
+
+# Add gene identifiers
+counts_up$gene <- rownames(counts_up)
+counts_down$gene <- rownames(counts_down)
+# Melt data into long format
+counts_up_melt <- reshape2::melt(counts_up, id.vars = "gene", variable.name = "Sample", value.name = "Count")
+counts_up_melt$regulation <- "Upregulated"
+counts_down_melt <- reshape2::melt(counts_down, id.vars = "gene", variable.name = "Sample", value.name = "Count")
+counts_down_melt$regulation <- "Downregulated"
+# Combine clearly
+counts_combined <- rbind(counts_up_melt, counts_down_melt)
+
+# Match survival data from metadata
+counts_combined$survival <- sample_metadata[counts_combined$Sample, "condition"]
+# Convert survival percentages clearly to numeric values for plotting
+counts_combined$survival_numeric <- as.numeric(gsub("%", "", counts_combined$survival))
+
+# Combine counts clearly into a single dataframe:
+counts_df <- counts_combined %>%
+  group_by(gene, regulation, survival_numeric) %>%
+  summarize(mean_count = mean(Count)) %>%
+  ungroup()
+# standardize expression (Z-score) across survival rates for each gene, making changes directly comparable:
+counts_df <- counts_df %>%
+  group_by(gene) %>%
+  mutate(z_score = scale(mean_count)) %>%
+  ungroup()
+
+# plot
+ggplot(counts_df, aes(x = survival_numeric, y = z_score, group = gene, color = regulation)) +
+  geom_line(alpha = 0.7, linewidth = 0.4) +
+  stat_summary(aes(group = regulation), fun = mean, geom = "line", linewidth = 1.5, color = "black") +
+  stat_summary(aes(group = regulation), fun = mean, geom = "point", size = 3, color = "black") +
+  scale_x_reverse(breaks = c(90, 50, 15), labels = c("90%", "50%", "15%")) + # <-- fix here
+  scale_color_manual(values = c("Upregulated" = "green", "Downregulated" = "red")) +
+  theme_bw() +
+  labs(
+    title = "Standardized Gene Expression Across Survival",
+    x = "Survival (%)",
+    y = "Standardized Expression (Z-score)",
+    color = "Regulation"
+  ) +
+  theme(text = element_text(size = 18)) + theme(panel.grid = element_blank())
+
+# Upregulated genes only
+ggplot(subset(counts_df, regulation == "Upregulated"),
+       aes(x = survival_numeric, y = z_score, group = gene)) +
+  geom_line(alpha = 0.7, linewidth = 0, color = "green") +
+  stat_summary(fun = mean, geom = "line", linewidth = 0.5, color = "darkgreen",) +
+  stat_summary(fun = mean, geom = "point", size = 1, color = "darkgreen") +
+  scale_x_reverse(breaks = c(90, 50, 15), labels = c("90%", "50%", "15%")) + 
+  theme_bw() +
+  labs(
+    title = "Upregulated Genes (90% → 15%)",
+    x = "Survival (%)",
+    y = "Standardized Expression (Z-score)"
+  ) +
+  theme(text = element_text(size = 12)) + theme(panel.grid = element_blank())
+
+# down regulated
+ggplot(subset(counts_df, regulation == "Downregulated"),
+       aes(x = survival_numeric, y = z_score, group = gene)) +
+  geom_line(alpha = 0.7, linewidth = 0, color = "red") +
+  stat_summary(fun = mean, geom = "line", linewidth = 0.5, color = "darkred") +
+  stat_summary(fun = mean, geom = "point", size = 1, color = "darkred") +
+  scale_x_reverse(breaks = c(90, 50, 15), labels = c("90%", "50%", "15%")) + # <-- fix here
+  theme_bw() +
+  labs(
+    title = "Downregulated Genes (90% → 15%)",
+    x = "Survival (%)",
+    y = "Standardized Expression (Z-score)"
+  ) +
+  theme(text = element_text(size = 20)) + theme(panel.grid = element_blank())
+
+#################### Chunk #################### 
+# // Find overlap of our candidate genes inside GenAge Model Organisms (Drosphila)
+# // We use the GenAge Build 21: Release Notes
+# // We use topR package for genomic visualization
+# // We also check for allele frequency differences between the CE and CL lines
+####################       ####################
+
+# Load in Aging genes:
+aging_genes <- read.csv("/Users/hamid/Desktop/GEN MSc Project/Data/models_genes/genage_models.csv")
+# Only keep Drosophila model organism
+aging_genes <- aging_genes %>%
+  filter(organism == "Drosophila melanogaster")
+# Check for matching genes between our annotated genes in variants and the GenAge databse
+matching_genes <- intersect(unique(top_degs$GeneName), aging_genes$symbol)
+matching_genes
+
+rm(aging_genes)
+rm(matching_genes)
+
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# CL vs CE
+```{r plot some figures, fig.height=8, fig.width=10, echo=FALSE, warning=FALSE, message=FALSE}
+
+########## DATA PREPERATION ###########
+
+# Define path to files
+data_path <- "/Users/hamid/Desktop/GEN MSc Project/Data/RNA seq"
+# Get list of files
+files <- list.files(path = data_path, pattern = "*_final.txt$", full.names = TRUE)
+
+
+# Create an empty list to store count data
+count_list <- list()
+# Loop over files to read data
+for (file in files) {
+  sample_name <- basename(file) %>% str_remove("_final.txt")
+  
+  df <- read.table(file, header = TRUE, sep = "\t")
+  # Extract gene names and counts (1st and 3rd column)
+  df_selected <- df[, c(1, 3)]
+  colnames(df_selected) <- c("Geneid", sample_name)
+  
+  count_list[[sample_name]] <- df_selected
+}
+# Merge all dataframes by 'gene'
+merged_counts <- purrr::reduce(count_list, full_join, by = "Geneid")
+
+
+# Fix gene names
+ann.hub <- AnnotationHub(ask = FALSE)
+# Access the Ensembl database for pig
+ann.hub.database <- query(ann.hub, pattern = c("Drosophila melanogaster", "EnsDb"), ignore.case = TRUE)
+# Acquire the latest annotation files ID
+id <- ann.hub.database %>%
+        mcols() %>%
+        rownames() %>%
+        tail(n = 1)
+# Downloading the Ensembldb database
+ensembl.database <- ann.hub[[id]]
+# Extract gene-level information from the database
+annotations <- genes(ensembl.database, 
+                     return.type = "data.frame")
+# Select annotations of interest
+annotations <- annotations %>%
+        dplyr::select(gene_id, gene_name, seq_name, gene_biotype, description)
+# Rename the column in annotations for consistency so that we can merge
+colnames(annotations)[1] <- "Geneid"
+# Merge annotations with the head counts
+merged_counts <- merge(
+  x = merged_counts, 
+  y = annotations[, c("Geneid", "gene_name")], 
+  by.x = "Geneid", 
+  by.y = "Geneid", 
+  all.x = TRUE
+)
+# Remove duplicates by keeping only the first occurrence
+unique_gene_names <- make.unique(as.character(merged_counts$gene_name))
+# Assign the unique gene names as row names
+rownames(merged_counts) <- unique_gene_names
+merged_counts$Geneid <- NULL
+merged_counts$gene_name <- NULL
+# Remove rows with missing gene names or zero counts or below 1
+merged_counts <- merged_counts[complete.cases(merged_counts), ]
+merged_counts <- merged_counts[rowSums(merged_counts) > 5, ] # count above 5
+
+
+
+# Function to average technical replicates
+avg_tech_reps <- function(data, pattern1, pattern2, new_name) {
+  averaged <- (data[[pattern1]] + data[[pattern2]]) / 2
+  data[[new_name]] <- averaged
+  data[, c(pattern1, pattern2)] <- NULL
+  return(data)
+}
+counts_final <- merged_counts %>%
+  avg_tech_reps("CE2-12-90H", "CE2-34-90H", "CE2_90") %>%
+  avg_tech_reps("CE2-12-50H", "CE2-34-50H", "CE2_50") %>%
+  avg_tech_reps("CE2-12-15H", "CE2-34-15H", "CE2_15") %>%
+  avg_tech_reps("CE3-12-90H", "CE3-34-90H", "CE3_90") %>%
+  avg_tech_reps("CE3-12-50H", "CE3-34-50H", "CE3_50") %>%
+  avg_tech_reps("CE3-12-15H", "CE3-34-15H", "CE3_15") %>%
+  avg_tech_reps("CL2-12-90H", "CL2-34-90H", "CL2_90") %>%
+  avg_tech_reps("CL2-12-50H", "CL2-34-50H", "CL2_50") %>%
+  avg_tech_reps("CL2-12-15H", "CL2-34-15H", "CL2_15") %>%
+  avg_tech_reps("CL3-12-90H", "CL3-34-90H", "CL3_90") %>%
+  avg_tech_reps("CL3-12-50H", "CL3-34-50H", "CL3_50") %>%
+  avg_tech_reps("CL3-12-15H", "CL3-34-15H", "CL3_15")
+# Round
+counts_final <- round(counts_final)
+
+# Function to sum technical replicates
+# Summing is important as averaging results in non interger values that are not accepted in DEseq2
+sum_tech_reps <- function(data, pattern1, pattern2, new_name) {
+  summed <- data[[pattern1]] + data[[pattern2]]
+  data[[new_name]] <- summed
+  data[, c(pattern1, pattern2)] <- NULL
+  return(data)
+}
+# Sum technical replicates clearly
+counts_final <- merged_counts %>%
+  sum_tech_reps("CE2-12-90H", "CE2-34-90H", "CE2_90") %>%
+  sum_tech_reps("CE2-12-50H", "CE2-34-50H", "CE2_50") %>%
+  sum_tech_reps("CE2-12-15H", "CE2-34-15H", "CE2_15") %>%
+  sum_tech_reps("CE3-12-90H", "CE3-34-90H", "CE3_90") %>%
+  sum_tech_reps("CE3-12-50H", "CE3-34-50H", "CE3_50") %>%
+  sum_tech_reps("CE3-12-15H", "CE3-34-15H", "CE3_15") %>%
+  sum_tech_reps("CL2-12-90H", "CL2-34-90H", "CL2_90") %>%
+  sum_tech_reps("CL2-12-50H", "CL2-34-50H", "CL2_50") %>%
+  sum_tech_reps("CL2-12-15H", "CL2-34-15H", "CL2_15") %>%
+  sum_tech_reps("CL3-12-90H", "CL3-34-90H", "CL3_90") %>%
+  sum_tech_reps("CL3-12-50H", "CL3-34-50H", "CL3_50") %>%
+  sum_tech_reps("CL3-12-15H", "CL3-34-15H", "CL3_15")
+
+
+######### TLR TEST BETWEEN CL AND CE ############
+
+print(metadata)
+
+# Define metadata
+metadata <- data.frame(
+  sampleID = colnames(counts_final),
+  lifespan = rep(c("CE", "CL"), each = 6),
+  survival_rate = rep(c("90", "50", "15"), times = 4),
+  bio_replicate = rep(c("1", "1", "1", "2", "2", "2"), times = 2)
+)
+rownames(metadata) <- metadata$sampleID
+metadata$sampleID<-NULL
+
+# Factor levels:
+metadata$lifespan <- factor(metadata$lifespan, levels = c("CE", "CL"))
+metadata$survival_rate <- factor(metadata$survival_rate, levels = c("90", "50", "15"))
+metadata$bio_replicate <- factor(metadata$bio_replicate)
+all(rownames(metadata) == colnames(counts_final))  # Should be TRUE
+metadata$bio_replicate <- NULL
+
+# Create DESeqDataSet
+dds <- DESeqDataSetFromMatrix(
+  countData = counts_final,
+  colData = metadata,
+  design = ~ lifespan + survival_rate + lifespan:survival_rate
+)
+
+# Run DESeq2 with Likelihood Ratio Test to check timeline effect:
+dds_lrt <- DESeq(dds, test = "LRT", reduced = ~ lifespan + survival_rate)
+# Results of the LRT testing if interaction significantly improves fit
+res_lrt <- results(dds_lrt, alpha = 0.05)
+#res_lrt <- results(dds_lrt,  name = "lifespan_Long_vs_Short")
+
+# Order results by adjusted p-value (FDR corrected)
+res_lrt <- res_lrt[order(res_lrt$padj), ]
+
+# Only works if CE2_12_15H is loaded from previous chunck
+# Add annotations to the results
+res_lrt$GeneName <- rownames(res_lrt)
+res_lrt$Description <- CE2_12_15H$description[match(rownames(res_lrt), CE2_12_15H$gene_name)]
+
+# Setup for visualization
+deseq_df <- res_lrt %>%
+  # make into data.frame
+  as.data.frame() %>%
+  # the gene names are row names -- let's make them a column for easy display
+  tibble::rownames_to_column("Gene") %>%
+  # add a column for significance threshold results
+  dplyr::mutate(threshold = padj < 0.05) %>%
+  # sort by statistic -- the highest values will be genes with
+  # higher expression in RPL10 mutated samples
+  dplyr::arrange(dplyr::desc(log2FoldChange))
+
+
+plotCounts(dds_lrt, gene = "CG42792", intgroup = c("survival_rate", "lifespan"))
+
+
+# HEATMAP
+# Subset top DEGs (adjusted p-value < 0.05)
+top_degs <- res_lrt[order(res_lrt$padj), ]
+top_degs <- top_degs[!is.na(top_degs$padj) & top_degs$padj < 0.05, ]
+# Select top 50 DEGs
+top50 <- head(top_degs, 50)
+# View selected DEGs
+head(top50)
+# Extract normalized counts for the top 50 DEGs
+normalized_counts <- counts(dds_lrt, normalized = TRUE)
+heatmap_data <- normalized_counts[rownames(normalized_counts) %in% rownames(top50), ]
+# Scale the counts for better visualization
+heatmap_data_scaled <- t(scale(t(heatmap_data)))
+# View heatmap data
+head(heatmap_data_scaled)
+# Create the heatmap
+pheatmap(
+  heatmap_data_scaled,
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  show_rownames = TRUE,
+  annotation_col = metadata,
+  main = "Heatmap of Top 20 DEGs", 
+)
+
+
+####### GO enrc
+# Function to perform GO enrichment for a given DESeq2 result
+perform_go_enrichment <- function(res_dge) {
+  # Convert ENSEMBL IDs to ENTREZ IDs
+  degs_entrez <- mapIds(
+    org.Dm.eg.db,
+    keys = rownames(res_dge),  
+    column = "ENTREZID",
+    keytype = "SYMBOL",  
+    multiVals = "first"
+  )
+
+  # Remove NA values
+  degs_entrez <- degs_entrez[!is.na(degs_entrez)]
+
+  # Perform GO enrichment analysis for Biological Process (BP)
+  go_results <- enrichGO(
+    gene = degs_entrez,
+    OrgDb = org.Dm.eg.db,
+    keyType = "ENTREZID",
+    ont = "BP",  
+    pvalueCutoff = 0.05,
+    pAdjustMethod = "BH",
+  )
+  return(go_results)
+}
+
+# Run GO analysis separately for each comparison
+go_CLvsCE_up <- perform_go_enrichment(res_lrt[!is.na(res_lrt$padj) & res_lrt$padj < 0.05 & res_lrt$log2FoldChange >= 1, ])
+go_CLvsCE_down <- perform_go_enrichment(res_lrt[!is.na(res_lrt$padj) & res_lrt$padj < 0.05 & res_lrt$log2FoldChange <= -1, ])
+
+# Dot plots for GO enrichment results
+p1 <- dotplot(go_CLvsCE, showCategory = 15) + 
+  ggtitle("GO Enrichment: 50% vs 90% Survival") +
+  theme_minimal()
+
+p1
+
+###### Plot expression across survival rate between CE and CL:
+# plot expression across time
+library(reshape2)
+library(ggplot2)
+# Extract significantly differentially expressed genes (adjusted p-value < 0.05)
+sig_gene_up <- res_lrt[which(res_lrt$padj < 0.05 & res_lrt$log2FoldChange > 0), ]
+sig_gene_down <- res_lrt[which(res_lrt$padj < 0.05 & res_lrt$log2FoldChange < -0), ]
+# Extract counts for up/down regulated genes
+counts_up <- counts_final[rownames(sig_gene_up), ]
+counts_down <- counts_final[rownames(sig_gene_down), ]
+
+# Add gene identifiers
+counts_up$gene <- rownames(counts_up)
+counts_down$gene <- rownames(counts_down)
+# Melt data into long format
+counts_up_melt <- reshape2::melt(counts_up, id.vars = "gene", variable.name = "Sample", value.name = "Count")
+counts_up_melt$regulation <- "Upregulated"
+counts_down_melt <- reshape2::melt(counts_down, id.vars = "gene", variable.name = "Sample", value.name = "Count")
+counts_down_melt$regulation <- "Downregulated"
+# Combine clearly
+counts_combined <- rbind(counts_up_melt, counts_down_melt)
+
+# Match survival data from metadata
+counts_combined$survival <- metadata[counts_combined$Sample, "survival_rate"]
+# Convert survival percentages clearly to numeric values for plotting
+counts_combined$survival_numeric <- as.numeric(gsub("%", "", counts_combined$survival))
+# Add lifespan info from metadata
+counts_combined$lifespan <- metadata[counts_combined$Sample, "lifespan"]
+
+# Combine counts clearly into a single dataframe:
+counts_df <- counts_combined %>%
+  group_by(gene, regulation, survival_numeric, lifespan) %>%
+  summarize(mean_count = mean(Count)) %>%
+  ungroup()
+# standardize expression (Z-score) across survival rates for each gene, making changes directly comparable:
+counts_df <- counts_df %>%
+  group_by(gene) %>%
+  mutate(z_score = scale(mean_count)) %>%
+  ungroup()
+
+
+ggplot(counts_df, aes(x = survival_numeric, y = z_score, group = lifespan, color = lifespan)) +
+  geom_line(alpha = 0.7, linewidth = 1) +
+  geom_point(size = 2) +
+  scale_x_reverse(breaks = c(90, 50, 15), labels = c("90%", "50%", "15%")) +
+  scale_color_manual(values = c("CE" = "red", "CL" = "blue")) +  # CE = Short (Red), CL = Long (Blue)
+  facet_wrap(~ gene, scales = "free_y") +  # Creates separate plots for each gene
+  theme_bw() +
+  labs(
+    title = "Gene Expression Trends Across Survival (Separated by Gene)",
+    x = "Survival (%)",
+    y = "Standardized Expression (Z-score)",
+    color = "Lifespan Group"
+  ) +
+  theme(
+    text = element_text(size = 12),
+    strip.text = element_text(size = 10)  # Adjust facet label size for readability
+  )
+
+
+ggplot(subset(counts_df, regulation == "Downregulated"),
+       aes(x = survival_numeric, y = z_score, group = gene, color = lifespan)) +
+  geom_line(alpha = 0.5, linewidth = 0.4) +
+  stat_summary(aes(group = lifespan), fun = mean, geom = "line", linewidth = 1.5) +
+  stat_summary(aes(group = lifespan), fun = mean, geom = "point", size = 3) +
+  scale_x_reverse(breaks = c(90, 50, 15), labels = c("90%", "50%", "15%")) +
+  scale_color_manual(values = c("CE" = "red", " CL" = "blue")) +  # Short = red, Long = blue
+  theme_bw() +
+  labs(
+    title = "Downregulated Genes Across Survival (Short vs. Long Lifespan)",
+    x = "Survival (%)",
+    y = "Standardized Expression (Z-score)",
+    color = "Lifespan Group"
+  ) +
+  theme(text = element_text(size = 12))
+
+
+
+
+
+
+
+######### WALD TEST BETWEEN CL AND CE ############
+
+
+metadata <- data.frame(
+  sampleID = colnames(counts_final),
+  lifespan = rep(c("CE", "CL"), each = 6),
+  survival_rate = rep(c("90", "50", "15"), times = 4),
+  biological_rep = rep(c("1", "1", "1", "2", "2", "2"), times = 2)
+)
+metadata$biological_rep <- NULL
+
+rownames(metadata) <- metadata$sampleID
+
+metadata$lifespan <- factor(metadata$lifespan, levels = c("CE", "CL"))
+metadata$survival_rate <- factor(metadata$survival_rate, levels = c("90", "50", "15"))
+
+# At 90%
+samples_90 <- metadata$sampleID[metadata$survival_rate == "90"]
+counts_90 <- counts_final[, samples_90]
+metadata_90 <- metadata[samples_90, ]
+metadata_90$sampleID <- NULL
+# At 50%
+samples_50 <- metadata$sampleID[metadata$survival_rate == "50"]
+counts_50 <- counts_final[, samples_50]
+metadata_50 <- metadata[samples_50, ]
+metadata_50$sampleID <- NULL
+# At 15%
+samples_15 <- metadata$sampleID[metadata$survival_rate == "15"]
+counts_15 <- counts_final[, samples_15]
+metadata_15 <- metadata[samples_15, ]
+metadata_15$sampleID <- NULL
+
+
+# Run the model
+dds_15 <- DESeqDataSetFromMatrix(
+  countData = counts_15,
+  colData = metadata_15,
+  design = ~ lifespan
+)
+dds_15 <- DESeq(dds_15)
+res_15 <- results(dds_15, contrast = c("lifespan", "CE", "CL"), alpha = 0.05)
+summary(res_15)
+
+
+# Setup for visualization
+deseq_df <- res_15 %>%
+  # make into data.frame
+  as.data.frame() %>%
+  # the gene names are row names -- let's make them a column for easy display
+  tibble::rownames_to_column("Gene") %>%
+  # add a column for significance threshold results
+  dplyr::mutate(threshold = padj < 0.05) %>%
+  # sort by statistic -- the highest values will be genes with
+  # higher expression in RPL10 mutated samples
+  dplyr::arrange(dplyr::desc(log2FoldChange))
+
+
+plotCounts(dds_lrt, gene = "Jafrac1", intgroup = c("survival_rate", "lifespan"))
+
+
+
+# MA Plot for all
+plotMA(res_15, main = "MA Plot: H200 vs B200", ylim = c(-2, 2))
+# Add a significance flag
+res_15$Significant <- ifelse(res_15$padj < 0.05, "Significant", "Not Significant")
+# Volcano Plot
+# Enhanced Volcano Plot
+ggplot(res_15, aes(x = log2FoldChange, y = -log10(padj), color = Significant)) +
+  geom_point(alpha = 0.6, size = 1.5) + # Increased point size for visibility
+  scale_color_manual(
+    values = c("grey70", "firebrick"),
+    labels = c("Not Significant", "Significant") # Clear legend labels
+  ) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "blue", size = 0.8) + # P-value threshold line
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "blue", size = 0.8) + # Fold change thresholds
+  labs(
+    title = "Volcano Plot: H200 vs B200",
+    subtitle = "Differential Gene Expression Analysis",
+    x = expression(Log[2] * " Fold Change"),
+    y = expression("-Log"[10] * " Adjusted P-value"),
+    color = "Gene Significance" # Legend title
+  ) +
+  theme_classic(base_size = 14) + # Classic theme for a clean look
+  theme(
+    plot.title = element_text(face = "bold", size = 16, hjust = 0.5),
+    plot.subtitle = element_text(size = 12, hjust = 0.5, color = "darkgray"),
+    axis.title = element_text(face = "bold"),
+    axis.text = element_text(color = "black"),
+    legend.position = "top", # Move legend to the top
+    legend.title = element_text(face = "bold")
+  )
+
+
+# HEATMAP
+# Subset top DEGs (adjusted p-value < 0.05)
+top_degs <- res_15[order(res_15$padj), ]
+top_degs <- top_degs[!is.na(top_degs$padj) & top_degs$padj < 0.05, ]
+# Select top 50 DEGs
+top50 <- head(top_degs, 50)
+# View selected DEGs
+head(top50)
+# Extract normalized counts for the top 50 DEGs
+normalized_counts <- counts(dds_15, normalized = TRUE)
+heatmap_data <- normalized_counts[rownames(normalized_counts) %in% rownames(top50), ]
+# Scale the counts for better visualization
+heatmap_data_scaled <- t(scale(t(heatmap_data)))
+# View heatmap data
+head(heatmap_data_scaled)
+# Create the heatmap
+pheatmap(
+  heatmap_data_scaled,
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  show_rownames = TRUE,
+  annotation_col = metadata_15,
+  main = "Heatmap of Top 20 DEGs", 
+)
+
+
+
+# Function to perform GO enrichment for a given DESeq2 result
+perform_go_enrichment <- function(res_dge) {
+  # Convert ENSEMBL IDs to ENTREZ IDs
+  degs_entrez <- mapIds(
+    org.Dm.eg.db,
+    keys = rownames(res_dge),  
+    column = "ENTREZID",
+    keytype = "SYMBOL",  
+    multiVals = "first"
+  )
+  # Remove NA values
+  degs_entrez <- degs_entrez[!is.na(degs_entrez)]
+  # Perform GO enrichment analysis for Biological Process (BP)
+  go_results <- enrichGO(
+    gene = degs_entrez,
+    OrgDb = org.Dm.eg.db,
+    keyType = "ENTREZID",
+    ont = "BP",  
+    pvalueCutoff = 0.05,
+    pAdjustMethod = "BH",
+  )
+  return(go_results)
+}
+
+# Run GO analysis separately for each comparison
+go_CLvsCE_15 <- perform_go_enrichment(res_15[!is.na(res_15$padj) & res_15$padj < 0.05, ])
+
+
+# Dot plots for GO enrichment results
+p1 <- dotplot(go_CLvsCE_15, showCategory = 15) + 
+  ggtitle("GO Enrichment: 50% vs 90% Survival") +
+  theme_minimal()
+
+
+
+
+
+plotCounts(dds_lrt, gene = "lncRNA:CR44864", intgroup = c("survival_rate"))
+
+
+
+
+# Show all dot plots together
+library(gridExtra)
+grid.arrange( p2, p3, ncol = 2)
+
+
+
+
+
+
+
+
+
+########## FULL TEST ###########
+##########           ###########
+
+# Extract sample order from counts_final
+sample_names <- colnames(merged_counts)
+counts_final <- merged_counts # our counts matrix
+
+# Define metadata dynamically based on the actual sample order in counts_final
+metadata <- data.frame(
+  sampleID = sample_names,
+  lifespan = ifelse(grepl("CE", sample_names), "CE", "CL"),  # Assign CE or CL based on sample name
+  #bio_replicate = gsub("-.*", "", sample_names),  # Extract bio replicate (e.g., CE2, CE3, CL2, CL3)
+  #bio_replicate = c("1", "1", "1", "2", "2", "2", "3", "3", "3", "4", "4", "4", "5", "5", "5", "6", "6", "6", "7", "7", "7", "8", "8", "8"), # Extract bio replicate (e.g., CE2, CE3, CL2, CL3)
+  #tech_replicate = rep(c("1", "1", "1", "2", "2", "2", "3", "3", "3", "4", "4", "4"), times = 2),  # Assign tech replicate based on pattern
+  bio_replicate = rep(c("1", "1", "1", "2", "2", "2", "3", "3", "3", "4", "4", "4"), times = 2), # Extract bio replicate (e.g., CE2, CE3, CL2, CL3)
+  tech_replicate = ifelse(grepl("-12-", sample_names), "1", "2"),  # Assign tech replicate based on pattern
+  survival_rate = gsub(".*-", "", sample_names))  # Extract survival rate (e.g., 90H, 50H, 15H)
+rownames(metadata) <- metadata$sampleID
+# Factor levels for reference
+metadata$survival_rate <- factor(metadata$survival_rate, levels = c("90H", "50H", "15H")) # reference for survival_rate is “90” baseline
+# Convert remaining columns to factors
+metadata$lifespan <- factor(metadata$lifespan, levels = c("CL", "CE")) # reference for survival_rate is “50” baseline
+metadata$bio_replicate <- factor(metadata$bio_replicate)
+metadata$tech_replicate <- factor(metadata$tech_replicate)
+
+
+
+############### LRT 
+# make model
+metadata$sampleID <- NULL
+dds <- DESeqDataSetFromMatrix(
+  countData = counts_final,
+  colData = metadata,
+  design = ~ lifespan + bio_replicate + bio_replicate + survival_rate + lifespan:survival_rate
+)
+
+# **LRT for Interaction: Tests if Lifespan Modifies Survival Effects**
+dds_lrt <- DESeq(dds, test = "LRT", reduced = ~ lifespan + bio_replicate + bio_replicate + survival_rate )
+resultsNames(dds_lrt)
+# Make results
+res_lrt <- results(dds_lrt, alpha = 0.05)
+summary(res_lrt)
+# Get genes where survival rate affects CE vs. CL differently
+interaction_genes <- rownames(res_lrt)[which(res_lrt$padj < 0.05)]
+interaction_genes # Show genes
+
+# plto
+plotCounts(dds_lrt, gene = "Jon99Cii", intgroup = c("survival_rate", "lifespan"))
+
+# Setup for visualization
+deseq_df <- res_lrt %>%
+  # make into data.frame
+  as.data.frame() %>%
+  # the gene names are row names -- let's make them a column for easy display
+  tibble::rownames_to_column("Gene") %>%
+  # add a column for significance threshold results
+  dplyr::mutate(threshold = padj < 0.05) %>%
+  # sort by statistic -- the highest values will be genes with
+  # higher expression in RPL10 mutated samples
+  dplyr::arrange(dplyr::desc(log2FoldChange))
+
+# only keep based on adjusted pvalue
+deseq_df <- deseq_df %>% filter(padj <= 0.05)
+# keep based on adjusted p value and log2fc change
+deseq_df <- deseq_df %>%
+  filter(padj <= 0.01 & log2FoldChange <= -1)
+
+
+
+
+###### Plot expression across survival rate between CE and CL:
+# plot expression across time
+library(reshape2)
+library(ggplot2)
+# Extract significantly differentially expressed genes (adjusted p-value < 0.05)
+sig_gene_up <- res_lrt[which(res_lrt$padj < 0.05 & res_lrt$log2FoldChange > 0), ]
+sig_gene_down <- res_lrt[which(res_lrt$padj < 0.05 & res_lrt$log2FoldChange < -0), ]
+# Extract counts for up/down regulated genes
+counts_up <- merged_counts[rownames(sig_gene_up), ]
+counts_down <- merged_counts[rownames(sig_gene_down), ]
+
+# Add gene identifiers
+counts_up$gene <- rownames(counts_up)
+counts_down$gene <- rownames(counts_down)
+# Melt data into long format
+counts_up_melt <- reshape2::melt(counts_up, id.vars = "gene", variable.name = "Sample", value.name = "Count")
+counts_up_melt$regulation <- "Upregulated"
+counts_down_melt <- reshape2::melt(counts_down, id.vars = "gene", variable.name = "Sample", value.name = "Count")
+counts_down_melt$regulation <- "Downregulated"
+# Combine clearly
+counts_combined <- rbind(counts_up_melt, counts_down_melt)
+
+# Match survival data from metadata
+counts_combined$survival <- metadata[counts_combined$Sample, "survival_rate"]
+# Convert survival percentages clearly to numeric values for plotting
+counts_combined$survival_numeric <- as.numeric(gsub("H", "", counts_combined$survival))
+# Add lifespan info from metadata
+counts_combined$lifespan <- metadata[counts_combined$Sample, "lifespan"]
+
+
+# Combine counts clearly into a single dataframe:
+counts_df <- counts_combined %>%
+  group_by(gene, regulation, survival_numeric, lifespan) %>%
+  summarize(mean_count = mean(Count)) %>%
+  ungroup()
+# standardize expression (Z-score) across survival rates for each gene, making changes directly comparable:
+counts_df <- counts_df %>%
+  group_by(gene) %>%
+  mutate(z_score = scale(mean_count)) %>%
+  ungroup()
+
+ggplot(counts_df, aes(x = survival_numeric, y = z_score, group = lifespan, color = lifespan)) +
+  geom_line(alpha = 0.7, linewidth = 1) +
+  geom_point(size = 2) +
+  scale_x_reverse(breaks = c(90, 50, 15), labels = c("90%", "50%", "15%")) +
+  scale_color_manual(values = c("CE" = "red", "CL" = "blue")) +  # CE = Short (Red), CL = Long (Blue)
+  facet_wrap(~ gene, scales = "free_y") +  # Creates separate plots for each gene
+  theme_bw() +
+  labs(
+    title = "Gene Expression Trends Across Survival (Separated by Gene)",
+    x = "Survival (%)",
+    y = "Standardized Expression (Z-score)",
+    color = "Lifespan Group"
+  ) +
+  theme(
+    text = element_text(size = 12),
+    strip.text = element_text(size = 10)  # Adjust facet label size for readability
+  )
+
+
+ggplot(subset(counts_df, regulation == "Downregulated"),
+       aes(x = survival_numeric, y = z_score, group = gene, color = lifespan)) +
+  geom_line(alpha = 0.5, linewidth = 0.4) +
+  stat_summary(aes(group = lifespan), fun = mean, geom = "line", linewidth = 1.5) +
+  stat_summary(aes(group = lifespan), fun = mean, geom = "point", size = 3) +
+  scale_x_reverse(breaks = c(90, 50, 15), labels = c("90%", "50%", "15%")) +
+  scale_color_manual(values = c("CE" = "red", " CL" = "blue")) +  # Short = red, Long = blue
+  theme_bw() +
+  labs(
+    title = "Downregulated Genes Across Survival (Short vs. Long Lifespan)",
+    x = "Survival (%)",
+    y = "Standardized Expression (Z-score)",
+    color = "Lifespan Group"
+  ) +
+  theme(text = element_text(size = 12))
+
+
+# HEATMAP
+# Subset top DEGs (adjusted p-value < 0.05)
+top_degs <- res_lrt[order(res_lrt$padj), ]
+top_degs <- top_degs[!is.na(top_degs$padj) & top_degs$padj < 0.1, ]
+# Select top 50 DEGs
+top50 <- head(top_degs, 50)
+# View selected DEGs
+head(top50)
+# Extract normalized counts for the top 50 DEGs
+normalized_counts <- counts(dds_lrt, normalized = TRUE)
+heatmap_data <- normalized_counts[rownames(normalized_counts) %in% unique(combined_deg_df$Gene), ]
+# Scale the counts for better visualization
+heatmap_data_scaled <- t(scale(t(heatmap_data)))
+# View heatmap data
+head(heatmap_data_scaled)
+# Create the heatmap
+pheatmap(
+  heatmap_data_scaled,
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  show_rownames = TRUE,
+  annotation_col = metadata_15,
+  main = "Heatmap of Top 20 DEGs", 
+)
+unique(combined_deg_df$Gene)
+
+unique(combined_deg_df$Gene)
+
+
+
+
+
+
+############### Pairwise
+############### Run CE vs. CL Comparisons at Each Survival Rate
+############### To test genes that are differentially expressed at specific survival levels, we split the dataset.
+# Subset data for each survival rate
+# Make new metadata
+# At 90%
+samples_90 <- metadata$sampleID[metadata$survival_rate == "90H"]
+counts_90 <- counts_final[, samples_90]
+metadata_90 <- metadata[samples_90, ]
+metadata_90$sampleID <- NULL
+# At 50%
+samples_50 <- metadata$sampleID[metadata$survival_rate == "50H"]
+counts_50 <- counts_final[, samples_50]
+metadata_50 <- metadata[samples_50, ]
+metadata_50$sampleID <- NULL
+# At 15%
+samples_15 <- metadata$sampleID[metadata$survival_rate == "15H"]
+counts_15 <- counts_final[, samples_15]
+metadata_15 <- metadata[samples_15, ]
+metadata_15$sampleID <- NULL
+
+# Run DESeq2 separately for each survival rate
+# Run the model
+# 90
+dds_90 <- DESeqDataSetFromMatrix(countData = counts_90, colData = metadata_90, design = ~ lifespan)
+dds_90 <- DESeq(dds_90)
+res_90 <- results(dds_90, contrast = c("lifespan", "CL", "CE"), alpha = 0.01)
+res_90$Description <- CE2_12_15H$description[match(rownames(res_90), CE2_12_15H$gene_name)]
+summary(res_90)
+# Setup for visualization
+deseq_df_90 <- res_90 %>%
+  # make into data.frame
+  as.data.frame() %>%
+  # the gene names are row names -- let's make them a column for easy display
+  tibble::rownames_to_column("Gene") %>%
+  # add a column for significance threshold results
+  dplyr::mutate(threshold = padj < 0.01) %>%
+  # sort by statistic -- the highest values will be genes with
+  # higher expression in RPL10 mutated samples
+  dplyr::arrange(dplyr::desc(log2FoldChange))
+# 50%
+dds_50 <- DESeqDataSetFromMatrix(countData = counts_50, colData = metadata_50, design = ~ lifespan)
+dds_50 <- DESeq(dds_50)
+res_50 <- results(dds_50, contrast = c("lifespan", "CL", "CE"), alpha = 0.01)
+res_50$Description <- CE2_12_15H$description[match(rownames(res_50), CE2_12_15H$gene_name)]
+summary(res_50)
+# Setup for visualization
+deseq_df_50 <- res_50 %>%
+  # make into data.frame
+  as.data.frame() %>%
+  # the gene names are row names -- let's make them a column for easy display
+  tibble::rownames_to_column("Gene") %>%
+  # add a column for significance threshold results
+  dplyr::mutate(threshold = padj < 0.01) %>%
+  # sort by statistic -- the highest values will be genes with
+  # higher expression in RPL10 mutated samples
+  dplyr::arrange(dplyr::desc(log2FoldChange))
+# 15
+dds_15 <- DESeqDataSetFromMatrix(countData = counts_15,colData = metadata_15, design = ~ lifespan)
+dds_15 <- DESeq(dds_15)
+res_15 <- results(dds_15, contrast = c("lifespan", "CL", "CE"), alpha = 0.01)
+res_15$Description <- CE2_12_15H$description[match(rownames(res_15), CE2_12_15H$gene_name)]
+summary(res_15)
+# Setup for visualization
+deseq_df_15 <- res_15 %>%
+  # make into data.frame
+  as.data.frame() %>%
+  # the gene names are row names -- let's make them a column for easy display
+  tibble::rownames_to_column("Gene") %>%
+  # add a column for significance threshold results
+  dplyr::mutate(threshold = padj < 0.01) %>%
+  # sort by statistic -- the highest values will be genes with
+  # higher expression in RPL10 mutated samples
+  dplyr::arrange(dplyr::desc(log2FoldChange))
+# only keep significant ones
+deseq_df_15$threshold <- NULL
+deseq_df_50$threshold <- NULL
+deseq_df_90$threshold <- NULL
+deseq_df_15 <- deseq_df_15 %>% filter(padj <= 0.01 & (log2FoldChange <= -1 | log2FoldChange >= 1))
+deseq_df_50 <- deseq_df_50 %>% filter(padj <= 0.01 & (log2FoldChange <= -1 | log2FoldChange >= 1))
+deseq_df_90 <- deseq_df_90 %>% filter(padj <= 0.01 & (log2FoldChange <= -1 | log2FoldChange >= 1))
+
+# Combine dataframe into one dataframe adn save in Excell:
+# Ensure the data contains gene names and log2FoldChange values
+deseq_df_15 <- deseq_df_15 %>% mutate(Survival = "15%")
+deseq_df_50 <- deseq_df_50 %>% mutate(Survival = "50%")
+deseq_df_90 <- deseq_df_90 %>% mutate(Survival = "90%")
+# Combine all DEGs 
+combined_deg_df <- bind_rows(deseq_df_15, deseq_df_50, deseq_df_90)
+# Add regulation status
+combined_deg_df <- combined_deg_df %>%
+  mutate(Regulation = case_when(
+    log2FoldChange >= 1  ~ "Upregulated in CL",
+    log2FoldChange <= -1 ~ "Upregulated in CE"
+  )) %>%
+  dplyr::select(Gene, Survival, log2FoldChange, padj, Regulation, Description)
+# Arrange for better readability
+combined_deg_df <- combined_deg_df %>%
+  arrange(Gene, Survival)
+# Load the package
+library(writexl)
+# Save as an Excel file
+write_xlsx(combined_deg_df, "/Users/hamid/Desktop/Presentie insect/Suplementary table/Supplementary_Table_4.xlsx")
+# Count unique genes per Regulation category
+unique_gene_counts <- combined_deg_df %>%
+  group_by(Regulation) %>%
+  summarise(unique_gene_count = n_distinct(Gene))
+# Print the result
+unique_gene_counts
+
+
+length(unique(combined_deg_df$Gene))
+
+# Genes Always Different Between CE and CL
+always_different <- rownames(res_90)[which(
+  res_90$padj < 0.01 & res_50$padj < 0.01 & res_15$padj < 0.01
+)]
+# Genes Only Different at 90% Survival
+only_90 <- rownames(res_90)[which(
+  res_90$padj < 0.01 & res_50$padj >= 0.01 & res_15$padj >= 0.01
+)]
+# Genes Only Different at 50% Survival
+only_50 <- rownames(res_50)[which(
+  res_90$padj >= 0.01 & res_50$padj < 0.01 & res_15$padj >= 0.01
+)]
+# Genes Only Different at 15% Survival
+only_15 <- rownames(res_15)[which(
+  res_90$padj >= 0.01 & res_50$padj >= 0.01 & res_15$padj < 0.01
+)]
+# Genes Same at 90% and 50%, But Different at 15%
+late_differential <- rownames(res_15)[which(
+  res_90$padj >= 0.01 & res_50$padj >= 0.01 & res_15$padj < 0.01
+)]
+# Genes Different at 90% and 50%, But Same at 15%
+early_differential <- rownames(res_90)[which(
+  res_90$padj < 0.01 & res_50$padj < 0.01 & res_15$padj >= 0.01
+)]
+# Genes Different at 90% and 15%, But Same at 50%
+early_late_differential <- rownames(res_90)[which(
+  res_90$padj < 0.01 & res_50$padj >= 0.01 & res_15$padj < 0.01
+)]
+# Genes Different at 50% and 15%, But Same at 90%
+mid_late_differential <- rownames(res_50)[which(
+  res_90$padj >= 0.01 & res_50$padj < 0.01 & res_15$padj < 0.01
+)]
+
+
+# VENN DIAGRAM
+# Install if not already installed
+# Install ggVennDiagram if not installed
+if (!requireNamespace("ggVennDiagram", quietly = TRUE)) {
+    install.packages("ggVennDiagram")
+}
+# Load necessary libraries
+library(ggVennDiagram)
+#### FO ALL DEGS
+# Extract gene names
+genes_15 <- deseq_df_15$Gene
+genes_50 <- deseq_df_50$Gene
+genes_90 <- deseq_df_90$Gene
+# Create a list of DEG sets
+deg_list <- list(
+  "15% Survival" = genes_15,
+  "50% Survival" = genes_50,
+  "90% Survival" = genes_90
+)
+# Generate the Venn diagram using ggVennDiagram
+ggVennDiagram(deg_list, label_alpha = 0, edge_lty = "solid", set_size = 5) +  # Adjust set label size
+  ggtitle("Overlapping Differentially Expressed Genes") +
+  scale_fill_gradient(low = "lightblue", high = "lightpink") +  # Adjusts color intensity
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),  # Removes grid lines
+    plot.title = element_text(size = 14, face = "bold"),  # Increase title size
+    legend.text = element_text(size = 10),  # Increase legend text size
+    legend.title = element_text(size = 14)  # Increase legend title size
+  ) +
+  scale_x_continuous(expand = expansion(mult = 0.3)) +  # Shrink the circles
+  scale_y_continuous(expand = expansion(mult = 0.3))  # Shrink the circles
+
+# Extract upregulated genes (higher in CL vs. CE)
+genes_CL_up_15 <- deseq_df_15 %>% filter(log2FoldChange >= 1) %>% pull(Gene)
+genes_CL_up_50 <- deseq_df_50 %>% filter(log2FoldChange >= 1) %>% pull(Gene)
+genes_CL_up_90 <- deseq_df_90 %>% filter(log2FoldChange >= 1) %>% pull(Gene)
+# Extract downregulated genes (higher in CE vs. CL)
+genes_CE_up_15 <- deseq_df_15 %>% filter(log2FoldChange <= -1) %>% pull(Gene)
+genes_CE_up_50 <- deseq_df_50 %>% filter(log2FoldChange <= -1) %>% pull(Gene)
+genes_CE_up_90 <- deseq_df_90 %>% filter(log2FoldChange <= -1) %>% pull(Gene)
+
+# Create list of genes upregulated in CL (log2FoldChange >= 1)
+deg_list_CL <- list(
+  "15% Survival" = genes_CL_up_15,
+  "50% Survival" = genes_CL_up_50,
+  "90% Survival" = genes_CL_up_90
+)
+# Generate Venn diagram for genes upregulated in CL
+ggVennDiagram(deg_list_CL, label_alpha = 0, edge_lty = "solid", set_size = 5) + 
+  ggtitle("Upregulated Genes in CL (log2FC >= 1)") +
+  scale_fill_gradient(low = "lightblue", high = "lightpink") + 
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),  
+    plot.title = element_text(size = 14, face = "bold"), 
+    legend.text = element_text(size = 10), 
+    legend.title = element_text(size = 14) 
+  ) +
+  scale_x_continuous(expand = expansion(mult = 0.3)) + 
+  scale_y_continuous(expand = expansion(mult = 0.3))
+
+# Create list of genes upregulated in CE (log2FoldChange <= -1)
+deg_list_CE <- list(
+  "15% Survival" = genes_CE_up_15,
+  "50% Survival" = genes_CE_up_50,
+  "90% Survival" = genes_CE_up_90
+)
+# Generate Venn diagram for genes upregulated in CE
+ggVennDiagram(deg_list_CE, label_alpha = 0, edge_lty = "solid", set_size = 5) + 
+  ggtitle("Upregulated Genes in CE (log2FC <= -1)") +
+  scale_fill_gradient(low = "lightblue", high = "lightpink") + 
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),  
+    plot.title = element_text(size = 14, face = "bold"),  
+    legend.text = element_text(size = 10), 
+    legend.title = element_text(size = 14)  
+  ) +
+  scale_x_continuous(expand = expansion(mult = 0.3)) + 
+  scale_y_continuous(expand = expansion(mult = 0.3))  
+
+
+#### GO ENRICHMENT
+
+# All genes:
+All_DEGs <- unique(combined_deg_df$Gene)
+# Upregulated in CL per survival rate
+cl_up_90 <- combined_deg_df %>% filter(Survival == "90%" & Regulation == "Upregulated in CL")
+cl_up_50 <- combined_deg_df %>% filter(Survival == "50%" & Regulation == "Upregulated in CL")
+cl_up_15 <- combined_deg_df %>% filter(Survival == "15%" & Regulation == "Upregulated in CL")
+# Find genes consistently upregulated in CL across all survival rates
+cl_consistent_up <- combined_deg_df %>%
+  filter(Regulation == "Upregulated in CL") %>%
+  group_by(Gene) %>%
+  filter(n_distinct(Survival) == 3) %>%
+  ungroup()
+# Upregulated in CE per survival rate
+ce_up_90 <- combined_deg_df %>% filter(Survival == "90%" & Regulation == "Upregulated in CE")
+ce_up_50 <- combined_deg_df %>% filter(Survival == "50%" & Regulation == "Upregulated in CE")
+ce_up_15 <- combined_deg_df %>% filter(Survival == "15%" & Regulation == "Upregulated in CE")
+# Find genes consistently upregulated in CE across all survival rates
+ce_consistent_up <- combined_deg_df %>%
+  filter(Regulation == "Upregulated in CE") %>%
+  group_by(Gene) %>%
+  filter(n_distinct(Survival) == 3) %>%
+  ungroup()
+
+# Combine all extracted dataframes into a list
+# Create a list where each element contains only gene names
+deg_list <- list(
+  "CL_Up_90" = unique(cl_up_90$Gene),
+  "CL_Up_50" = unique(cl_up_50$Gene),
+  "CL_Up_15" = unique(cl_up_15$Gene),
+  "CL_Consistent_Up" = unique(cl_consistent_up$Gene),
+  "CE_Up_90" = unique(ce_up_90$Gene),
+  "CE_Up_50" = unique(ce_up_50$Gene),
+  "CE_Up_15" = unique(ce_up_15$Gene),
+  "CE_Consistent_Up" = unique(ce_consistent_up$Gene),
+  "All DEGs" = unique(All_DEGs)
+)
+
+# Prepare the GO KEGG analysis for the DE up-regulated markers using the drosophila database
+for (i in 1: length(deg_list)) {
+  deg_list[[i]] = bitr(deg_list[[i]], fromType="SYMBOL", toType="ENTREZID", OrgDb="org.Dm.eg.db") # org.Hs.eg.db for human
+}
+# do the same here, a line like below for each cluster
+genelist.all.pos <- list()
+for (i in 1: length(deg_list)) {
+  genelist.all.pos[paste(i - 1)] <- list(deg_list[[i]]$ENTREZID)
+}
+# Now manually rename the elements in `genelist.all.pos` AFTER execution in the same order as made
+custom_names <- c("CL_Up_90", "CL_Up_50", "CL_Up_15", "CL_Consistent_Up", 
+                  "CE_Up_90", "CE_Up_50", "CE_Up_15", "CE_Consistent_Up", "All DEGs")
+# Ensure renaming is applied correctly
+if (length(genelist.all.pos) == length(custom_names)) {
+  names(genelist.all.pos) <- custom_names
+}
+
+# Set  fig.height=20, fig.width=7
+# Drosophla DATABSE
+# Do the GO and KEGG on biological process on DE up-regulated markers
+GOclusterplot.all.pos <- compareCluster(geneCluster = genelist.all.pos, fun = "enrichGO", OrgDb = "org.Dm.eg.db", ont = 'BP', pAdjustMethod = "BH", pvalueCutoff  = 0.05, minGSSize = 10, maxGSSize = 500, ) # universe = GO_background_entrez for correct backgorund
+dotplot(GOclusterplot.all.pos, showCategory=4) + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+
+#### GSEA ENRICHMENT
+# Make negative Log2FC positive in CE upregulated genes (these were negative due to CL as reference for DEG)
+ce_up_90$log2FoldChange <- abs(ce_up_90$log2FoldChange)
+ce_up_50$log2FoldChange <- abs(ce_up_50$log2FoldChange)
+ce_up_15$log2FoldChange <- abs(ce_up_15$log2FoldChange)
+ce_consistent_up$log2FoldChange <- abs(ce_consistent_up$log2FoldChange)
+
+# Sort the gene lists base don adjusted pvalue 
+cl_up_90 <- cl_up_90[order(-cl_up_90$log2FoldChange) ,]
+cl_up_50 <- cl_up_50[order(-cl_up_50$log2FoldChange) ,]
+cl_up_15 <- cl_up_15[order(-cl_up_15$log2FoldChange) ,]
+cl_consistent_up <- cl_consistent_up[order(-cl_consistent_up$log2FoldChange) ,]
+ce_up_90 <- ce_up_90[order(-ce_up_90$log2FoldChange) ,]
+ce_up_50 <- ce_up_50[order(-ce_up_50$log2FoldChange) ,]
+ce_up_15 <- ce_up_15[order(-ce_up_15$log2FoldChange) ,]
+ce_consistent_up <- ce_consistent_up[order(-ce_consistent_up$log2FoldChange) ,]
+all_genes <- combined_deg_df[order(combined_deg_df$log2FoldChange) ,]
+
+# Prepare the GSEA list for each category
+#Up in CL
+GSEA_cl_up_90 <- cl_up_90$log2FoldChange
+names(GSEA_cl_up_90) <- cl_up_90$Gene
+GSEA_cl_up_50 <- cl_up_50$log2FoldChange
+names(GSEA_cl_up_50) <- cl_up_50$Gene
+GSEA_cl_up_15 <- cl_up_15$log2FoldChange
+names(GSEA_cl_up_15) <- cl_up_15$Gene
+GSEA_cl_consistent_up <- cl_consistent_up$log2FoldChange
+names(GSEA_cl_consistent_up) <- cl_consistent_up$Gene
+# Up in CE
+GSEA_ce_up_90 <- ce_up_90$log2FoldChange
+names(GSEA_ce_up_90) <- ce_up_90$Gene
+GSEA_ce_up_50 <- ce_up_50$log2FoldChange
+names(GSEA_ce_up_50) <- ce_up_50$Gene
+GSEA_ce_up_15 <- ce_up_15$log2FoldChange
+names(GSEA_ce_up_15) <- ce_up_15$Gene
+GSEA_ce_consistent_up <- ce_consistent_up$log2FoldChange
+names(GSEA_ce_consistent_up) <- ce_consistent_up$Gene
+# All genes
+GSEA_all_genes <- all_genes$log2FoldChange
+names(GSEA_all_genes) <- all_genes$Gene
+
+# Combine all extracted dataframes into a list
+# Create a list where each element contains only gene names
+deg_list <- list(
+  "CL_Up_90" = GSEA_cl_up_90,
+  "CL_Up_50" = GSEA_cl_up_50,
+  "CL_Up_15" = GSEA_cl_up_15,
+  "CL_Consistent_Up" = GSEA_cl_consistent_up,
+  "CE_Up_90" = GSEA_ce_up_90,
+  "CE_Up_50" = GSEA_ce_up_50,
+  "CE_Up_15" = GSEA_ce_up_15,
+  "CE_Consistent_Up" = GSEA_ce_consistent_up
+#  "All_genes" = GSEA_all_genes
+)
+
+# New empty list to store mapped IDs:
+deg_list_entrez <- list()
+# Looping through each element of deg_list:
+for (name in names(deg_list)) {
+  # Extract the current named numeric vector:
+  current_vec <- deg_list[[name]]
+  # Convert SYMBOL (names) to ENTREZ ID
+  mapped_df <- bitr(
+    geneID = names(current_vec),
+    fromType = "SYMBOL",
+    toType = "ENTREZID",
+    OrgDb = org.Dm.eg.db
+  )
+  # Remove duplicates, if any
+  mapped_df <- mapped_df[!duplicated(mapped_df$SYMBOL), ]
+  # Retain only successfully mapped genes:
+  valid_indices <- names(current_vec) %in% mapped_df$SYMBOL
+  current_vec <- current_vec[valid_indices]
+  # Now rename genes with ENTREZ IDs:
+  names(current_vec) <- mapped_df$ENTREZID[match(names(current_vec), mapped_df$SYMBOL)]
+  # Save the result into a new list:
+  deg_list_entrez[[name]] <- current_vec
+}
+
+# Loop through each list element and remove duplicate ENTREZ IDs
+for (name in names(deg_list_entrez)) {
+  # Find and remove duplicates
+  deg_list_entrez[[name]] <- deg_list_entrez[[name]][!duplicated(names(deg_list_entrez[[name]]))]}
+
+# Set  fig.height=20, fig.width=7
+# Drosophla DATABSE
+# Example for one element:
+GOclusterplot.all.pos <- gseGO(
+  gene          = deg_list_entrez[["CE_Up_15"]],
+  OrgDb         = org.Dm.eg.db,
+  keyType       = "ENTREZID",
+  ont           = "BP", minGSSize = 10, maxGSSize = 500, pvalueCutoff = 0.01)
+
+GOclusterplot.all.pos <- setReadable(GOclusterplot.all.pos, OrgDb = org.Dm.eg.db) # convert EntrezID to gene symbol
+dotplot(GOclusterplot.all.pos, showCategory=15)
+
+gseaplot(GOclusterplot.all.pos, geneSetID = 4, title = GOclusterplot.all.pos$Description[4])
+#gseaplot2(GOclusterplot.all.pos, pvalue_table = FALSE, geneSetID = 1:15, )
+
+# Loop throught th elist
+GOclusterplot.all.pos <- compareCluster(geneCluster = deg_list_entrez, fun = "gseGO", OrgDb = "org.Dm.eg.db", ont = 'BP', pAdjustMethod = "BH", pvalueCutoff  = 0.05) # universe = GO_background_entrez for correct backgorund
+dotplot(GOclusterplot.all.pos, showCategory=15) + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+plotCounts(dds_lrt, gene = "Amy-p", intgroup = c("survival_rate", "lifespan"))
+
+
+
+####### COMPARING TO DIVERGED ALLELES and aging markers
+  "CL_Up_90" = cl_up_90$Gene,
+  "CL_Up_50" = cl_up_50$Gene,
+  "CL_Up_15" = cl_up_15$Gene,
+  "CL_Consistent_Up" = cl_consistent_up$Gene,
+  "CE_Up_90" = ce_up_90$Gene,
+  "CE_Up_50" = ce_up_50$Gene,
+  "CE_Up_15" = ce_up_15$Gene,
+  "CE_Consistent_Up" = ce_consistent_up$Gene,
+  "All DEGs" = All_DEGs
+
+# Load in Aging genes:
+aging_genes <- read.csv("/Users/hamid/Desktop/GEN MSc Project/Data/models_genes/genage_models.csv")
+# Only keep Drosophila model organism
+aging_genes <- aging_genes %>%
+  filter(organism == "Drosophila melanogaster")
+# Check for matching genes between our annotated genes in variants and the GenAge databse
+matching_genes <- intersect(ce_up_90$Gene, aging_genes$symbol)
+matching_genes
+matching_genes <- intersect(unique(annotated_snps_df$gene_name), All_DEGs)
+matching_genes
+
+rm(aging_genes)
+rm(matching_genes)
+
+Pi3K92E
+JhI-21
+
+
+
+
+# Extract significantly differentially expressed genes (adjusted p-value < 0.05)
+sig_gene_up <- res_50[which(res_50$padj < 0.05 & res_50$log2FoldChange > 0), ]
+sig_gene_down <- res_50[which(res_50$padj < 0.05 & res_50$log2FoldChange < -0), ]
+# Extract counts for up/down regulated genes
+counts_up <- merged_counts[rownames(sig_gene_up), ]
+counts_down <- merged_counts[rownames(sig_gene_down), ]
+
+# Add gene identifiers
+counts_up$gene <- rownames(counts_up)
+counts_down$gene <- rownames(counts_down)
+# Melt data into long format
+counts_up_melt <- reshape2::melt(counts_up, id.vars = "gene", variable.name = "Sample", value.name = "Count")
+counts_up_melt$regulation <- "Upregulated"
+counts_down_melt <- reshape2::melt(counts_down, id.vars = "gene", variable.name = "Sample", value.name = "Count")
+counts_down_melt$regulation <- "Downregulated"
+# Combine clearly
+counts_combined <- rbind(counts_up_melt, counts_down_melt)
+
+# Match survival data from metadata
+counts_combined$survival <- metadata[counts_combined$Sample, "survival_rate"]
+# Convert survival percentages clearly to numeric values for plotting
+counts_combined$survival_numeric <- as.numeric(gsub("H", "", counts_combined$survival))
+# Add lifespan info from metadata
+counts_combined$lifespan <- metadata[counts_combined$Sample, "lifespan"]
+
+
+# Combine counts clearly into a single dataframe:
+counts_df <- counts_combined %>%
+  group_by(gene, regulation, survival_numeric, lifespan) %>%
+  summarize(mean_count = mean(Count)) %>%
+  ungroup()
+# standardize expression (Z-score) across survival rates for each gene, making changes directly comparable:
+counts_df <- counts_df %>%
+  group_by(gene) %>%
+  mutate(z_score = scale(mean_count)) %>%
+  ungroup()
+
+counts_df <- counts_df %>% filter(gene == "Amy-p")
+```
+
+```{r plot some figures, fig.height=3, fig.width=5, echo=FALSE, warning=FALSE, message=FALSE}
+
+ggplot(counts_df, aes(x = survival_numeric, y = z_score, group = lifespan, color = lifespan)) +
+  geom_line(alpha = 0.7, linewidth = 1) +
+  geom_point(size = 2) +
+  scale_x_reverse(breaks = c(90, 50, 15), labels = c("90%", "50%", "15%")) +
+  scale_color_manual(values = c("CE" = "red", "CL" = "blue")) +  # CE = Short (Red), CL = Long (Blue)
+  facet_wrap(~ gene, scales = "free_y") +  # Creates separate plots for each gene
+  theme_bw() +
+  labs(
+    title = "Gene Expression Trends Across Survival (Separated by Gene)",
+    x = "Survival (%)",
+    y = "Standardized Expression (Z-score)",
+    color = "Lifespan Group"
+  ) +
+  theme(
+    text = element_text(size = 12),
+    strip.text = element_text(size = 10)  # Adjust facet label size for readability
+  )
+```
+

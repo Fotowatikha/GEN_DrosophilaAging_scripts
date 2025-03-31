@@ -1,0 +1,169 @@
+---
+title: "Data processing after permuations - Final FDR correction"
+name: Hamid Fotowatikha
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+# In the chuck below, we load in all the essential libraries for the data analysis
+```{r Load Libraries, echo=FALSE, results=FALSE, include=FALSE, include=FALSE}
+install.packages(c("BiocManager", "vcfR", "tidyr", "dplyr", "dbplyr", "patchwork", "tidyverse", "gsubfn", "purrr", 
+                   "lme4", "lmerTest", "broom.mixed", "glmmTMB", "DHARMa", "car", "ggplot2", "qqman", "stats", 
+                   "kableExtra", "knitr", "writexl", "furrr", "future", "future.apply", "data.table", "topr", "pheatmap"))
+
+BiocManager::install(c("VariantAnnotation", "annotatr", "GenomicFeatures", "TxDb.Dmelanogaster.UCSC.dm6.ensGene", 
+                        "org.Dm.eg.db", "AnnotationHub", "ensembldb", "clusterProfiler", "org.Hs.eg.db", "biomaRt", 
+                        "Biostrings", "GenomicRanges", "BSgenome.Dmelanogaster.UCSC.dm6", "Rsamtools", "txdbmaker"))
+#BiocManager
+library(BiocManager)
+#VariantAnnotation
+library(VariantAnnotation)
+# for vcf
+library(vcfR)
+# For parsing
+library(tidyr)
+library(dplyr)
+library(dbplyr)
+library(patchwork)
+library(tidyverse)
+library(gsubfn) 
+library(purrr)
+# for glm
+library(lme4)
+library(lmerTest) 
+library(broom.mixed) # For tidying model output
+library(glmmTMB) # for weighted GLMM
+library(DHARMa) # to check statistical assumptions
+library(car) # for type3 anova 
+# for plots
+library(ggplot2)
+library(patchwork)  # Allows combining multiple ggplots
+library(ggrepel) 
+library(pheatmap) 
+library(ggforce) 
+library(RColorBrewer)
+library(qqman) # for manhatten and qqplot
+library(stats)       # KS test
+# For tables:
+library(kableExtra)
+library(knitr)
+# Some other packages for gene information extraction from Ensembl
+library(BiocFileCache)
+library(AnnotationHub)
+library(ensembldb)  
+# For annotation, gene name conversions (yes, we include human too)
+#library(rPanglaoDB)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(org.Dm.eg.db)
+library(biomaRt)
+library(Biostrings) # to find reverse complement
+# Save DEGs to excel sheet with gene information
+library(writexl)
+# For multithreading and memory management
+library(furrr)
+library(future)
+library(future.apply)
+library(data.table) # for large DFs and fast data manipulation
+# For genetic annotation
+library(txdbmaker)
+library(annotatr)  # Main package for annotation
+library(GenomicFeatures)  # Extracting genomic features from TxDb.
+library(TxDb.Dmelanogaster.UCSC.dm6.ensGene)  # Transcript data for Drosophila DM6
+library(org.Dm.eg.db)  # Gene annotations for Drosophila
+library(GenomicRanges)  # Handling genomic intervals
+# Exon mutation annotation
+library(Rsamtools) # to import cutom .fa
+library(VariantAnnotation)
+library(BSgenome.Dmelanogaster.UCSC.dm6)
+# TopR visualition
+library(topr)
+```
+
+
+```{r setup, include=FALSE}
+#################### Chunk #################### 
+# // Load in the permuted data sets and pivot their pvalues in the observed data (True pvalues)
+# // Make an observed vs expected pvalue grpah form the permuted data for each fixed effect
+# // For each observed pvalue for each variant calculate the proportion of permuted pvalues lower observed
+# // We only consider SNPs with this FDR == 0
+####################       ####################
+
+# Since this codeblock is expensive to run, we set up parallel processing
+plan(multisession, workers = parallel::detectCores() - 1)
+
+# Step 1: Load Observed P-values or import as is from current sessions (called test_results_sig)
+test_results_sig <- fread("/Users/hamid/Desktop/GEN MSc Project/Data/TEST/test_results_sig.csv")
+setDT(test_results_sig)  # Convert to data.table fo compatibility with the package (this is faster than base R)
+# Load Permuted P-values (each file is one permuted dataset)
+perm_files <- list.files("/Users/hamid/Desktop/GEN MSc Project/Data/TEST/Permutations_SoftWeight/GLM_results_permutation20/", full.names = TRUE)
+perm_data_list <- lapply(perm_files, fread)  # Load all 20 permutation datasets
+rm(perm_files)
+
+# Step 2: Extract the observed pvalue from our true pvalues measured from the fly_group (CE, CL)
+observed_pvalues <- test_results_sig[, .(variant_id, CHROM, POS, p_value_fly_group)]
+
+# Step 3: Calculate  FDR Separately for each Permutation dataset according to previous study (source!!!!!!!)
+########## Function ########## 
+# // Function to calculate FDR from 10 permuted datasets by ranking the genome-wide P-values of the true data and each of the P-value datasets of the 10 permutations. For every "true" P-value we calculated the proportion of permuted P-values with a lower value than a given P-value. This value is equivalent to an FDR value as defined by Storey et al., 2003 (two other srouces: Hoesjes et al. 2019; Jha et al. 2015)
+# // The function returns the calculated FDR value for each permuted dataset, in step 4
+compute_fdr_optimized <- function(observed_p, permuted_p_sorted) {
+  # We first rank observed p-values once
+  observed_ranks <- frank(observed_p, ties.method = "min")  # We levarage "frank()" from data.table package, which is faster than regular "rank()"
+  # Count how many permuted p-values are lower than or equal to observed ones (vapply to ensure it is fully vectorized)
+  count_lower <- vapply(observed_p, function(p) sum(permuted_p_sorted <= p), integer(1))
+  # Compute empirical FDR
+  fdr_values <- count_lower / observed_ranks
+  fdr_values[fdr_values > 1] <- 1  # Ensure FDR does not exceed 1 (which will definitely happen with our method)
+  return(fdr_values)
+}
+# Step 4: Calculate FDR for Each Permuted Dataset Separately (by calling the function above, we do this in parallel)
+fdr_values_list <- future_lapply(perm_data_list, function(perm_data) {
+  setorder(perm_data, p_value_fly_group)  # Sort once using data.table for efficiency
+  compute_fdr_optimized(observed_pvalues$p_value_fly_group, perm_data$p_value_fly_group)
+}, future.seed = TRUE)  # Ensure reproducibility
+# Stop parallel processing
+plan(sequential)
+
+# Step 5: Average the 10 FDR Values Per SNP
+fdr_matrix <- do.call(cbind, fdr_values_list)  # Convert list to matrix
+test_results_sig$Mean_FDR_fly_group <- rowMeans(fdr_matrix)  # Compute mean FDR
+
+# Step 6: CHeck how many with FDR 0 and save
+length(which(test_results_sig$Mean_FDR_fly_group == 0))
+# Save 
+write.csv(test_results_sig, "/Users/hamid/Desktop/GEN MSc Project/Data/TEST/test_results_with_FDR_20Permutations.csv", row.names = FALSE)
+
+# Remove old dataframes
+rm(fdr_matrix)
+rm(fdr_values_list)
+rm(observed_pvalues)
+rm(perm_data_list)
+rm(compute_fdr_optimized)
+
+# Step 7: Visualization
+# Histogram of Observed vs. Permuted P-values
+perm_data_list[[1]]$type <- "Permuted"
+test_results_sig$type <- "Observed"
+plot_data <- rbind(
+  data.table(p_value = test_results_sig$p_value_fly_group, type = "Observed"),
+  data.table(p_value = perm_data_list[[1]]$p_value_fly_group, type = "Permuted")  # Use first permutation dataset
+)
+
+ggplot(plot_data, aes(x = p_value, fill = type)) +
+  geom_histogram(alpha = 0.5, position = "identity", bins = 50) +
+  theme_minimal() +
+  labs(title = "Distribution of Observed vs. Permuted P-values",
+       x = "P-value", y = "Frequency") +
+  scale_fill_manual(values = c("Observed" = "red", "Permuted" = "blue"))
+rm(plot_data)
+# Volcano Plot Highlighting Significant SNPs
+ggplot(test_results_sig, aes(x = -log10(p_value_fly_group), y = -log10(Mean_FDR_fly_group))) +
+  geom_point(aes(color = Mean_FDR_fly_group == 0.0)) +
+  theme_minimal() +
+  labs(title = "Volcano Plot of P-values and FDR",
+       x = "-log10(P-value)", y = "-log10(FDR)") +
+  scale_color_manual(values = c("FALSE" = "black", "TRUE" = "red"))
+```

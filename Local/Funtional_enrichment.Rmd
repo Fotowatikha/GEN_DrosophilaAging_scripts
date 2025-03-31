@@ -1,0 +1,457 @@
+---
+title: "GO enirchment analysis"
+name: Hamid Fotowatikha
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+# In the chuck below, we load in all the essential libraries for the data analysis
+```{r Load Libraries, echo=FALSE, results=FALSE, include=FALSE, include=FALSE}
+install.packages(c("BiocManager", "vcfR", "tidyr", "dplyr", "dbplyr", "patchwork", "tidyverse", "gsubfn", "purrr", 
+                   "lme4", "lmerTest", "broom.mixed", "glmmTMB", "DHARMa", "car", "ggplot2", "qqman", "stats", 
+                   "kableExtra", "knitr", "writexl", "furrr", "future", "future.apply", "data.table", "topr", "pheatmap"))
+
+BiocManager::install(c("VariantAnnotation", "annotatr", "GenomicFeatures", "TxDb.Dmelanogaster.UCSC.dm6.ensGene", 
+                        "org.Dm.eg.db", "AnnotationHub", "ensembldb", "clusterProfiler", "org.Hs.eg.db", "biomaRt", 
+                        "Biostrings", "GenomicRanges", "BSgenome.Dmelanogaster.UCSC.dm6", "Rsamtools", "txdbmaker"))
+#BiocManager
+library(BiocManager)
+#VariantAnnotation
+library(VariantAnnotation)
+# for vcf
+library(vcfR)
+# For parsing
+library(tidyr)
+library(dplyr)
+library(dbplyr)
+library(patchwork)
+library(tidyverse)
+library(gsubfn) 
+library(purrr)
+# for glm
+library(lme4)
+library(lmerTest) 
+library(broom.mixed) # For tidying model output
+library(glmmTMB) # for weighted GLMM
+library(DHARMa) # to check statistical assumptions
+library(car) # for type3 anova 
+# for plots
+library(ggplot2)
+library(patchwork)  # Allows combining multiple ggplots
+library(ggrepel) 
+library(pheatmap) 
+library(ggforce) 
+library(RColorBrewer)
+library(qqman) # for manhatten and qqplot
+library(stats)       # KS test
+# For tables:
+library(kableExtra)
+library(knitr)
+# Some other packages for gene information extraction from Ensembl
+library(BiocFileCache)
+library(AnnotationHub)
+library(ensembldb)  
+# For annotation, gene name conversions (yes, we include human too)
+#library(rPanglaoDB)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(org.Dm.eg.db)
+library(biomaRt)
+library(Biostrings) # to find reverse complement
+# Save DEGs to excel sheet with gene information
+library(writexl)
+# For multithreading and memory management
+library(furrr)
+library(future)
+library(future.apply)
+library(data.table) # for large DFs and fast data manipulation
+# For genetic annotation
+library(txdbmaker)
+library(annotatr)  # Main package for annotation
+library(GenomicFeatures)  # Extracting genomic features from TxDb.
+library(TxDb.Dmelanogaster.UCSC.dm6.ensGene)  # Transcript data for Drosophila DM6
+library(org.Dm.eg.db)  # Gene annotations for Drosophila
+library(GenomicRanges)  # Handling genomic intervals
+# Exon mutation annotation
+library(Rsamtools) # to import cutom .fa
+library(VariantAnnotation)
+library(BSgenome.Dmelanogaster.UCSC.dm6)
+# TopR visualition
+library(topr)
+```
+
+
+# Make gene background for GO enrichment
+```{r Data analysi, fig.height=10, fig.width=6, echo=FALSE, warning=FALSE, message=FALSE}
+# fig.height=3.5, fig.width=6.5 default
+
+#################### Chunk #################### 
+# // Genic Annotations of variants with FDR == 0
+# // Genic annotations are determined by functions from GenomicFeatures and data from the TxDb.dm and org.dm.eg.db packages. 
+# // Genic annotations include 1-5Kb upstream of the TSS, the promoter (< 1Kb upstream of the TSS), 5’UTR, first exons, exons, introns, CDS, 3’UTR, and intergenic regions (the intergenic regions exclude the previous list of annotations). 
+# // This work is carried out according to the following documentations:
+# -- https://bioconductor.org/packages/devel/bioc/vignettes/GenomicFeatures/inst/doc/GenomicFeatures.html#installing-the-genomicfeatures-package
+# -- https://bioconductor.org/packages/devel/bioc/vignettes/annotatr/inst/doc/annotatr-vignette.html#introduction
+# // We make use of the txdb databse: TxDb.Dmelanogaster.UCSC.dm6.ensGene which is compatible with all BDGP6.nn releases from ENSAMBL
+# // TxDb.Dmelanogaster.UCSC.dm6 provides gene, transcript, exon, and CDS annotations based on the dm6 assembly from UCSC, using Ensembl gene models (ensGene).
+####################       ####################
+
+test_results <- read.csv("/Users/hamid/Desktop/GEN MSc Project/Data/GLMM_results_full_model_SoftWeight.csv") # all variants tested for GLMM, we need to make GO backgorund
+test_results <- test_results %>% # only keep relevatn columns
+  dplyr::select(CHROM, POS, variant_id)
+
+# load the the Drosophila DM6
+# Loading the package like this will also create a TxDb object, and by default that object will have the same name as the package itself
+#txdb <- TxDb.Dmelanogaster.UCSC.dm6.ensGene
+#TxDb.Dmelanogaster.UCSC.dm6.ensGene # extract information for material and methods
+
+txdb <- makeTxDbFromGFF("/Users/hamid/Desktop/GEN MSc Project/HackFlex test/Indexed bams (H200:B200 12:16 cycles)/1. Dros fa:gtf/Drosophila_melanogaster.BDGP6.46.112.sorted.gtf", organism = "Drosophila melanogaster") # Or from our own .gtf from ensambl
+# Checking available information in the Drosohila TxDb object
+columns(txdb) # Check available columns (e.g. "CDSCHROM"   "CDSEND"     "CDSID"      "CDSNAME"    "CDSSTART"...)
+keytypes(txdb) # Check for avvailable Keytypes (e.g. "CDSID"    "CDSNAME"  "EXONID"   "EXONNAME" "GENEID"   "TXID"     "TXNAME"...)
+
+# Change chromosome names to match dm6 assembly, so chromosome "2L" becomes chr2L. We do this to ensure compatibility when parsing
+#test_results$CHROM <- paste0("chr", test_results$CHROM) # DO NOT RUN THIS TWICE FOR FUCK SAKE or when using custom .gtf!!!
+
+# For example, If we wanted to only set Chromosome 2L to be active, we could do it like this
+# BUT WE WILL NOT DO THAT, because then on only chromosome 2L would be consulted when you call the various retrieval methods
+head(seqlevels(txdb)) # Check chromosomes
+#seqlevels(txdb) <- "chr2L" # note that we can use regular "2L" names when making our own txdb from ENSAMBL .gtf
+# If we need to reset back to the original seqlevels (i.e. to the seqlevels stored in the db), then set the seqlevels to:
+#seqlevels(txdb) <- seqlevels0(txdb)
+
+# Now we will define the regions we want to annotate, these are essentially metadata objects
+# Define promoters
+promoters <- promoters(txdb, upstream = 1000, downstream = 0) #  upstream and downstream to specifies regions around TSS to be used as a promoter while accounting for a transcripts's strand.
+# Define enhancer region
+upstream_1to5kb <- promoters(txdb, upstream = 5000, downstream = 1000)
+# Define 5’UTR, 3’UTR, CDS, Exons, Introns
+fiveUTRs <- fiveUTRsByTranscript(txdb, use.names = TRUE)
+threeUTRs <- threeUTRsByTranscript(txdb, use.names = TRUE)
+cds_regions <- cdsBy(txdb, by = "tx", use.names = TRUE)  # CDS (Coding Sequences) "tx" is by transcript (so it inlcudes isophorms)
+exons <- exonsBy(txdb, by = "gene")  # Exons
+introns <- intronsByTranscript(txdb, use.names = TRUE)  # Introns
+intergenic_regions <- gaps(unlist(range(exons)))  # Regions between genes: There is no built-in intergenic annotation, but we can define intergenic regions as any region that is not assigned to a gene in txdb. We will not use this in the end!!!
+
+# Convert our test_results to a GenomicRanges object
+test_results_gr <- makeGRangesFromDataFrame(
+    test_results,
+    seqnames.field = "CHROM",
+    start.field = "POS",
+    end.field = "POS",  # SNPs are single positions so end position is the same as start position
+    keep.extra.columns = TRUE  # Retain variant_id column
+)
+
+########## Function ########## 
+# // Function to annotate the variants using findOverlaps() function
+# // Since annotatr does not support CDS, we manually annotate SNPs with all genic regions
+annotate_overlap <- function(snps, annotation, name) {
+    hits <- findOverlaps(snps, annotation)
+    df <- data.frame(
+        variant_id = test_results$variant_id[queryHits(hits)],
+        Annotation_Type = name,
+        Gene_ID = names(annotation)[subjectHits(hits)]
+    )
+    return(df)
+}
+# Apply the function
+annotations_list <- list(
+    annotate_overlap(test_results_gr, promoters, "Promoter"),
+    annotate_overlap(test_results_gr, upstream_1to5kb, "1-5Kb Upstream"),
+    annotate_overlap(test_results_gr, fiveUTRs, "5'UTR"),
+    annotate_overlap(test_results_gr, threeUTRs, "3'UTR"),
+    annotate_overlap(test_results_gr, cds_regions, "CDS"),
+    annotate_overlap(test_results_gr, exons, "Exon"),
+    annotate_overlap(test_results_gr, introns, "Intron"))
+
+
+
+#################### Chunk #################### 
+# // Here we leverage AnnotationHub to convert flybase GENE_IDs to actual gene names
+# // We use the latest Drosophila melanogaster annotations from Ensambk databse
+# // Servers could be down in some instances, that does not mean the code does not work!!!
+####################       ####################
+
+# Connect to AnnotationHub
+ann.hub <- AnnotationHub(ask = FALSE)
+ann.hub.database <- query(ann.hub, pattern = c("Drosophila melanogaster", "EnsDb"), ignore.case = TRUE)
+# Acquire the latest annotation files ID
+id <- ann.hub.database %>%
+        mcols() %>%
+        rownames() %>%
+        tail(n = 1) # The most bottom iuID in the ann.hub.database represent the most updated
+# Downloading the Ensembldb database
+ensembl.database <- ann.hub[[id]]
+# Extract gene-level information from the database
+annotations <- genes(ensembl.database, 
+                     return.type = "data.frame")
+# Select annotations of interest
+annotations <- annotations %>%
+        dplyr::select(gene_id, canonical_transcript, gene_name, seq_name, gene_biotype, description)
+
+# Annotate the regions using the annotation hub database
+annotated_snps <- list()
+# Loop through each dataframe in annotations_list containing unique regions of the genome (e.g Exon, Intron ect)
+for (i in seq_along(annotations_list)) {
+  df <- annotations_list[[i]]  # Extract dataframe
+  # if "Exon" is present in "Annotation_Type", Merge using gene_id (FBgn..........) as exons are annotated with FBgn
+  if (any(grepl("Exon", df$Annotation_Type, ignore.case = TRUE))) {
+    merged_df <- df %>%
+      left_join(annotations, by = c("Gene_ID" = "gene_id")) 
+  } else { # Merge using canonical_transcript (FBtr..........), because only Exons have FBgn values in our annotation method using txdb
+    merged_df <- df %>%
+      left_join(annotations, by = c("Gene_ID" = "canonical_transcript")) # the rest contains FBtr "canonical_transcripts"
+  }
+  # Store the processed dataframe back in the empty list
+  annotated_snps[[i]] <- merged_df
+}
+
+# Merge the generated lists of "annotations_list" each annotated variant (e.g.Promoter, Exons, Intron...)
+annotated_snps_df <- bind_rows(annotated_snps)
+# Make the GO backgorund (universe)
+GO_background <- unique(annotated_snps_df$gene_name)
+
+
+# remove old objects
+rm(annotated_snps_df )
+rm(txdb)
+rm(promoters)
+rm(upstream_1to5kb)
+rm(fiveUTRs)
+rm(threeUTRs)
+rm(cds_regions)
+rm(exons)
+rm(intergenic_regions)
+rm(gene_strand)
+rm(introns)
+rm(test_results_gr)
+rm(annotate_overlap)
+rm(annotations_list)
+rm(idx)
+
+rm(ann.hub)
+rm(ann.hub.database)
+rm(id)
+rm(ensembl.database)
+rm(annotations)
+
+rm(merged_df_gene_id)
+rm(merged_df_canonical)
+rm(missing_gene_names)
+rm(group_cols)
+rm(count_non_na)
+rm(completeness_scores)
+rm(i)
+rm(match_idx)
+rm(matched_genes)
+rm(merged_df)
+rm(flybase_missing_annotation)
+rm(final_merged_df)
+rm(df)
+rm(annotated_snps)
+rm(non_matching_variants)
+
+rm(variants_with_only_exon)
+rm(variants_to_keep)
+rm(sum_affected_isoforms)
+
+rm(genes_with_only_one_isoform)
+rm(genes_to_modify)
+rm(isoform_counts)
+rm(test_results)
+rm(tx_by_gene)
+rm(dup_mask)
+rm(combo)
+rm(combo_counts)
+```
+
+# GO ENRICHMENT ANALYSIS
+```{r Data analysi, fig.height=11, fig.width=12, echo=FALSE, warning=FALSE, message=FALSE}
+#################### Chunk #################### 
+# // Now we will perform GO enrichment in different annotated categories
+# // KEGG enrichment for each annotated category
+####################       ####################
+
+# import the corrected gene set background by annotating all the genes for the 1,4 million variants tested
+GO_background_entrez <- bitr(
+  GO_background, 
+  fromType = "SYMBOL",  # Your current gene ID type
+  toType = "ENTREZID",  # Convert to Entrez ID
+  OrgDb = "org.Dm.eg.db"  # Drosophila annotation database
+)
+# Extract only the Entrez IDs
+GO_background_entrez <- unique(GO_background_entrez$ENTREZID)
+
+
+# Define the annotation types to analyze
+annotation_types <- c("1-5Kb Upstream", "Promoter", 
+                      "3'UTR", "5'UTR", "Exon", "CDS", "Intron")
+
+# Extract gene lists for each annotation type
+gene_lists <- lapply(annotation_types, function(annotation) {
+  annotated_snps_df %>%
+    filter(Annotation_Type == annotation & !is.na(gene_name)) %>%
+    pull(gene_name) %>%
+    unique()
+})
+# Extract gene list for CDS (nonsynonymous mutations only)
+gene_lists[["CDS (nonsynonymous)"]] <- annotated_snps_df %>%
+  filter(Annotation_Type == "CDS" & CONSEQUENCE == "nonsynonymous" & !is.na(gene_name)) %>%
+  pull(gene_name) %>%
+  unique()
+# Extract gene list for CDS (synonymous mutations only)
+gene_lists[["CDS (synonymous)"]] <- annotated_snps_df %>%
+  filter(Annotation_Type == "CDS" & CONSEQUENCE == "synonymous" & !is.na(gene_name)) %>%
+  pull(gene_name) %>%
+  unique()
+# Include all unique genes in a new category "All Genes"
+gene_lists[["All Genes"]] <- annotated_snps_df %>%
+  filter(!is.na(gene_name)) %>%
+  pull(gene_name) %>%
+  unique()
+
+# Prepare the GO KEGG analysis for the DE up-regulated markers using the drosophila database
+for (i in 1: length(gene_lists)) {
+  gene_lists[[i]] = bitr(gene_lists[[i]], fromType="SYMBOL", toType="ENTREZID", OrgDb="org.Dm.eg.db") # org.Hs.eg.db for human
+}
+# do the same here, a line like below for each cluster
+genelist.all.pos <- list()
+for (i in 1: length(gene_lists)) {
+  genelist.all.pos[paste(i - 1)] <- list(gene_lists[[i]]$ENTREZID)
+}
+
+# Now manually rename the elements in `genelist.all.pos` AFTER execution in the same order as made
+custom_names <- c("1-5Kb Upstream", "Promoter", "3'UTR", "5'UTR", 
+                  "Exon", "CDS", "Intron", "CDS (nonsynonymous)", "CDS (synonymous)", "All Genes")
+# Ensure renaming is applied correctly
+if (length(genelist.all.pos) == length(custom_names)) {
+  names(genelist.all.pos) <- custom_names
+}
+
+# Set  fig.height=20, fig.width=7
+# Drosophla DATABSE
+# Do the GO and KEGG on biological process on DE up-regulated markers
+GOclusterplot.all.pos <- compareCluster(geneCluster = genelist.all.pos, fun = "enrichGO", OrgDb = "org.Dm.eg.db", ont = 'BP', pAdjustMethod = "BH", pvalueCutoff  = 0.05, minGSSize = 10, maxGSSize = 500, universe = GO_background_entrez) # universe = GO_background_entrez for correct backgorund
+dotplot(GOclusterplot.all.pos, showCategory=4) + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# KEGG
+# suported orgnaism can ben found here: https://www.genome.jp/kegg/catalog/org_list.html
+KEGGclusterplot.all.pos <- compareCluster(geneCluster = genelist.all.pos, fun = "enrichKEGG", organism = "dme", pvalueCutoff  = 0.05,)
+dotplot(KEGGclusterplot.all.pos, showCategory=4) + theme(axis.text.x = element_text(angle = 45, hjust = 1))#+ coord_flip() + theme(axis.text.x = element_text(angle=90))
+# set enterids as readable gnee names
+GOclusterplot.all.pos <- setReadable(GOclusterplot.all.pos, OrgDb = org.Dm.eg.db)
+# No we generate a dotplot of GO pathways that we think makes sense within the statistically significant once.
+# Before we only plotted the top 2, but these are not always the most relevant.
+GO.table <- GOclusterplot.all.pos@compareClusterResult # we save the result obtained from the GO enrichment in a new list of vectors
+write_xlsx(GO.table, "/Users/hamid/Desktop/Presentie insect/Suplementary table/Supplementary_Table_3.xlsx")
+#GO.table # take a look for a second to see the order of the columns. 
+#colnames(GO.table) # check column names that we will use to extract the data of interest
+GO.table$p.adjust <- as.numeric(GO.table$p.adjust) # lets make the adjusted p-value numeric, so that we can use it in the legend of the final plot
+GO.table$GeneRatio <- as.numeric(sapply(strsplit(GO.table$GeneRatio, "/"), function(x) as.numeric(x[1])/as.numeric(x[2])))  # lets make the generatio numeric, so that we can use it in the legend of the final plot. since its a string of ratio (e.g. 20/70), we have to splot by "/" and divide
+# Filter GO terms of interest for plot:
+go_terms_to_keep <- c("GO:0006783", "GO:0042168", "GO:0033014", "GO:0046033", "GO:0009126",
+                      "GO:0009167", "GO:0007301", "GO:0030725", "GO:0030723", "GO:0030717",
+                      "GO:0048806", "GO:0007300", "GO:0035215", "GO:0007411", "GO:0097485",
+                      "GO:0007409", "GO:0061564", "GO:0048812", "GO:0008038",
+                      "GO:0061061",
+                      "GO:0007517", "GO:0016567",
+                      "GO:0043687", "GO:0006513", "GO:0007522", "GO:0016203",
+                      "GO:0060538", "GO:0007520", "GO:0014902", "GO:0007186", "GO:0042058",
+                      "GO:0007173", "GO:0042059", "GO:1901184", "GO:0038127", "GO:1901185",
+                      "GO:0035330", "GO:0035329", "GO:0035332", "GO:1904262", "GO:0000165")
+# Filter the table to retain only rows with the specified GO terms
+filtered_GO_table <- GO.table[GO.table$ID %in% go_terms_to_keep, ]
+# Now combine the GO term ID and Description in new column to use for plotting
+filtered_GO_table$term <- paste(filtered_GO_table$Description, " - ", filtered_GO_table$ID)
+# Make the terms as factor with levels in the order they appear in filtered_GO_table
+# Create a new unique term column to avoid duplication issues
+filtered_GO_table$term_unique <- factor(filtered_GO_table$term, levels = unique(filtered_GO_table$term))
+# Plot using the unique term column
+ggplot(filtered_GO_table) +
+  geom_point(aes(x = term_unique, 
+                 y = Cluster,
+                 size = GeneRatio,
+                 fill = p.adjust), colour="black", shape=21, stroke = 0.5) +
+  theme_bw() +
+  scale_fill_gradient(low = 'red2', high = 'skyblue', limits = range(filtered_GO_table$p.adjust, na.rm = TRUE)) +
+  coord_flip() +  
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 12, colour = "black")) +
+  theme(axis.text.y = element_text(angle = 0, hjust = 1, size = 12, colour = "black"))
+
+
+unique(overlapping_rows$gene_name)
+
+#################### Chunk #################### 
+# // Now we will perform GO enrichment in different annotated categories usingt he human database
+# // Here we map the drosohpila genes to the human orthologs
+####################       ####################
+
+# Define the Ensembl database
+ensembl = useEnsembl(biomart = "genes")
+# Set up datasets for Drosophila and Human
+drosophila_mart <- useEnsembl(biomart = "genes", dataset = "dmelanogaster_gene_ensembl", host =  "dec2021.archive.ensembl.org")
+human_mart <- useEnsembl(biomart = "genes", dataset = "hsapiens_gene_ensembl",host =  "dec2021.archive.ensembl.org")
+
+
+# Function to convert each list
+convert_genes <- function(gene_vector) {
+  result <- getLDS(
+    attributes = c("external_gene_name"),  # Drosophila gene symbols
+    filters = "external_gene_name",
+    values = gene_vector,
+    mart = drosophila_mart,
+    attributesL = c("external_gene_name"),  # Human gene symbols
+    martL = human_mart
+  )
+  
+  colnames(result) <- c("Drosophila_Symbol", "Human_Symbol")
+  return(result)
+}
+
+# Apply function to all gene lists
+converted_lists <- lapply(gene_lists, convert_genes)
+# remove Drosohpila column names
+for (i in 1: length(converted_lists)) {
+  converted_lists[[i]]$Drosophila_Symbol <- NULL
+}
+converted_lists <- lapply(converted_lists, function(df) df[[1]])
+
+# Prepare the GO KEGG analysis for the DE up-regulated markers using the human database
+for (i in 1: length(converted_lists)) {
+  converted_lists[[i]] = bitr(converted_lists[[i]], fromType="SYMBOL", toType="ENTREZID", OrgDb="org.Hs.eg.db") # org.Hs.eg.db for human
+}
+# do the same here, a line like below for each cluster
+genelist.all.pos <- list()
+for (i in 1: length(converted_lists)) {
+  genelist.all.pos[paste(i - 1)] <- list(converted_lists[[i]]$ENTREZID)
+}
+
+# Human DATABSE
+# Do the GO and KEGG on biological process on DE up-regulated markers
+GOclusterplot.all.pos <- compareCluster(geneCluster = genelist.all.pos, fun = "enrichGO", OrgDb = "org.Hs.eg.db", ont = 'BP', pvalueCutoff  = 0.05)
+dotplot(GOclusterplot.all.pos, showCategory=4) + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+# KEGG
+# suported orgnaism can ben found here: https://www.genome.jp/kegg/catalog/org_list.html
+KEGGclusterplot.all.pos <- compareCluster(geneCluster = genelist.all.pos, fun = "enrichKEGG", organism = "hss", pvalueCutoff  = 0.05)
+dotplot(KEGGclusterplot.all.pos, showCategory=8) + theme(axis.text.x = element_text(angle = 45, hjust = 1))#+ coord_flip() + theme(axis.text.x =
+
+rm(ensembl)
+rm(drosophila_mart)
+rm(human_mart)
+rm(convert_genes)
+rm(converted_lists)
+rm(gene_lists)
+rm(genelist.all.pos)
+rm(GOclusterplot.all.pos)
+rm(annotation_types)
+rm(i)
+rm(KEGGclusterplot.all.pos)
+rm(custom_names)
+rm(GO.table)
+rm(filtered_GO_table)
+rm(go_terms_to_keep)
+
+
+```
